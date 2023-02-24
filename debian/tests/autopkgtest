@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -eu
+
+export AUTOPKGTEST_TEST_INSTALLED=yes
+
+./tests/autopkgtest
+
+if [ "$(id -u)" != 0 ]; then
+    sudo \
+    AUTOPKGTEST_TEST_INSTALLED="$AUTOPKGTEST_TEST_INSTALLED" \
+    ./tests/autopkgtest NullRunnerRoot ChrootRunner
+fi

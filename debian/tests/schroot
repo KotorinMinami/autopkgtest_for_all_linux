@@ -1,0 +1,58 @@
+#!/bin/sh
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+suite=testing
+arch="$(dpkg --print-architecture)"
+
+scratch="$(mktemp -d -p /var/lib/schroot/unpack)"
+
+# schroot does a lot of name resolution, and suffers a lot if it's slow.
+# Unfortunately, a trivial setup of lxc on Debian 11 has fast resolution
+# for A records, but trying to resolve the lxc container's hostname as an
+# AAAA record takes several seconds, making this test fail inside a lxc
+# container. We can work around this by making sure the container's
+# hostname is in /etc/hosts, which is checked before DNS by default.
+if ! HOSTNAME="$(hostname)" perl -e 'while (<>) { exit 0 if m/\s\Q$ENV{HOSTNAME}\E(\s|$)/; } exit 1;'; then
+    echo "127.0.1.1 $(hostname)" >> /etc/hosts
+fi
+
+if ! sbuild-createchroot \
+    --arch="$arch" \
+    --make-sbuild-tarball "/srv/$suite-$arch.tar" \
+    "$suite" "$scratch"
+then
+    echo "SKIP: Unable to create chroot $suite-$arch-sbuild"
+    rm -fr "$scratch"
+    exit 77
+fi
+
+export AUTOPKGTEST_TEST_SCHROOT="testing-$arch-sbuild"
+
+if ! schroot -d / -c "$AUTOPKGTEST_TEST_SCHROOT" -- true
+then
+    echo "SKIP: Unable to enter chroot $suite-$arch-sbuild"
+    exit 77
+fi
+
+if [ -z "${AUTOPKGTEST_TEST_UNINSTALLED-}" ]; then
+    export AUTOPKGTEST_TEST_INSTALLED=yes
+fi
+
+# Wrapping the test in annotate-output helps to distinguish the output of
+# the autopkgtest that is running these tests from the output of the
+# autopkgtest that is under test, which would otherwise be really confusing.
+annotate-output ./tests/autopkgtest SchrootRunner
+
+if [ -n "${AUTOPKGTEST_NORMAL_USER-}" ]; then
+    usermod -a -G sbuild "$AUTOPKGTEST_NORMAL_USER"
+    runuser -u "$AUTOPKGTEST_NORMAL_USER" -- annotate-output ./tests/autopkgtest \
+        SchrootRunner.test_dsc_build_needed_success \
+        SchrootRunner.test_setup_commands \
+        SchrootRunner.test_tree_norestrictions_nobuild_success \
+        SchrootRunner.test_user \
+        SchrootRunner.test_user_needs_root \
+        ${NULL+}
+fi

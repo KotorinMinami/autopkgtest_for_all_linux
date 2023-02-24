@@ -1,0 +1,27 @@
+#!/bin/sh
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+vendor=debian
+suite=testing
+
+if [ -z "${AUTOPKGTEST_TEST_UNINSTALLED-}" ]; then
+    export AUTOPKGTEST_TEST_INSTALLED=yes
+    build_podman=autopkgtest-build-podman
+else
+    build_podman=tools/autopkgtest-build-podman
+fi
+
+if ! "$build_podman" --vendor="$vendor" --release="$suite" --init=systemd; then
+    echo "SKIP: Unable to build autopkgtest/systemd/$vendor:$suite container"
+    exit 77
+fi
+
+export AUTOPKGTEST_TEST_PODMAN_INIT="autopkgtest/systemd/$vendor:$suite"
+export PYTHONUNBUFFERED=1
+# Wrapping the test in annotate-output helps to distinguish the output of
+# the autopkgtest that is running these tests from the output of the
+# autopkgtest that is under test.
+exec annotate-output ./tests/autopkgtest PodmanInitRunner

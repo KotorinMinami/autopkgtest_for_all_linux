@@ -1,0 +1,15 @@
+*~
+*.orig
+*.rej
+*.pyc
+doc/*.html
+
+debian/autopkgtest
+debian/*.debhelper
+debian/tmp
+debian/files
+
+debian/*.debhelper.log
+debian/*.substvars
+
+runner/tmp

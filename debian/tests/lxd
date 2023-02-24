@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+arch=$(dpkg --print-architecture)
+if [ "$arch" != i386 -a "$arch" != amd64 ]; then
+    # we don't have LXD images for most non-x86 architectures
+    echo "Skipping on non-x86 architecture $arch"
+    exit 77
+fi
+
+if [ -z "${AUTOPKGTEST_NORMAL_USER-}" ]; then
+    echo "Skipping test because it requires an AUTOPKGTEST_NORMAL_USER"
+    exit 77
+fi
+
+if [ -z "${AUTOPKGTEST_TEST_UNINSTALLED-}" ]; then
+    export AUTOPKGTEST_TEST_INSTALLED=yes
+    build_lxd=autopkgtest-build-lxd
+else
+    build_lxd=tools/autopkgtest-build-lxd
+fi
+
+# Detect LXD API extensions
+lxd_extension() {
+    lxc info | grep -q "^\- ${1}$"
+}
+
+lxd waitready
+lxd init --minimal
+lxd init --dump
+adduser "$AUTOPKGTEST_NORMAL_USER" lxd
+
+[ -n "${http_proxy:-}" ] && lxc config set core.proxy_http "${http_proxy}"
+[ -n "${https_proxy:-}" ] && lxc config set core.proxy_https "${https_proxy}"
+
+# work around broken PTMU in Canonical Scalingstack
+iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+testing="$(debian-distro-info --testing)"
+
+runuser -u "$AUTOPKGTEST_NORMAL_USER" -- \
+"$build_lxd" "images:debian/$testing/$arch"
+
+exec annotate-output \
+runuser -u "$AUTOPKGTEST_NORMAL_USER" -- \
+env \
+    AUTOPKGTEST_TEST_INSTALLED="${AUTOPKGTEST_TEST_INSTALLED-}" \
+    AUTOPKGTEST_TEST_UNINSTALLED="${AUTOPKGTEST_TEST_UNINSTALLED-}" \
+    AUTOPKGTEST_TEST_LXD="autopkgtest/debian/$testing/$arch" \
+./tests/autopkgtest LxdRunner

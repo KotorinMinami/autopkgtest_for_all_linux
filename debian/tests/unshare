@@ -1,0 +1,40 @@
+#!/bin/sh
+# Copyright 2022 Jochen Sprickerhof
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+suite=testing
+scratch="$(mktemp -d)"
+
+# --skip=cleanup/apt/lists: expected by tests, alternatively autopkgtest -U
+if ! mmdebstrap \
+    --include=eatmydata \
+    --mode=unshare \
+    --skip=cleanup/apt/lists \
+    --variant=buildd \
+    "$suite" \
+    "$scratch/rootfs.tar" \
+    "deb http://deb.debian.org/debian $suite main" \
+    "deb-src http://deb.debian.org/debian $suite main" \
+    ${NULL+}
+then
+    echo "SKIP: Unable to create rootfs tarball"
+    rm -fr "$scratch"
+    exit 77
+fi
+
+export AUTOPKGTEST_TEST_UNSHARE="$scratch/rootfs.tar"
+
+if [ -z "${AUTOPKGTEST_TEST_UNINSTALLED-}" ]; then
+    export AUTOPKGTEST_TEST_INSTALLED=yes
+fi
+
+# Wrapping the test in annotate-output helps to distinguish the output of
+# the autopkgtest that is running these tests from the output of the
+# autopkgtest that is under test, which would otherwise be really confusing.
+e=0
+annotate-output ./tests/autopkgtest UnshareRunner || e=1
+rm -fr "$scratch"
+exit "$e"

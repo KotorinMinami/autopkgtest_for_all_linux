@@ -1,0 +1,184 @@
+#!/usr/bin/python3
+#
+# autopkgtest-virt-unshare is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# autopkgtest is Copyright (C) 2006-2007 Canonical Ltd.
+# autopkgtest-virt-unshare is Copyright (C) 2016 Johannes Schauer
+# autopkgtest-virt-unshare is Copyright (C) 2022 Jochen Sprickerhof
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import argparse
+import os
+import pathlib
+import shlex
+import sys
+import tempfile
+
+sys.path.insert(0, '/usr/share/autopkgtest/lib')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'lib'))
+
+import VirtSubproc
+import adtlog
+
+capabilities = [
+    'revert',
+    'revert-full-system',
+    'root-on-testbed',
+    'suggested-normal-user=unshare',
+]
+
+tarball = None
+rootdir = None
+bind_mount = []
+
+
+def parse_args():
+    global tarball, rootdir, bind_mount
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '-a', '--arch', help='Debian name of the architecture', default='*'
+    )
+    parser.add_argument(
+        '-b',
+        '--bind',
+        action='append',
+        nargs=2,
+        help='Bind mount a directory from the outside to a mountpoint inside.',
+        metavar=('OUTSIDE', 'INSIDE')
+    )
+    parser.add_argument(
+        '-d', '--debug', action='store_true', help='Enable debugging output.'
+    )
+    parser.add_argument(
+        '-p',
+        '--prefix',
+        help='Prefix for the temporary unpack directory (passed to mkdtemp).',
+    )
+    parser.add_argument(
+        '-r',
+        '--release',
+        help='The distribution to use Mnemonic: the r is the first letter in "release".',
+        default='*',
+    )
+    parser.add_argument('-t', '--tarball', help='Path to rootfs tarball.')
+    parser.add_argument('-u', '--unpack-dir', help='Temporary unpack directory.')
+
+    args = parser.parse_args()
+
+    if args.tarball:
+        tarball = args.tarball
+    else:
+        xdg_cache_home = pathlib.Path('~/.cache/sbuild').expanduser()
+        if 'XDG_CACHE_HOME' in os.environ:
+            xdg_cache_home = pathlib.Path(os.environ['XDG_CACHE_HOME']).joinpath('/sbuild')
+
+        chroots = xdg_cache_home.glob(f'{args.release}-{args.arch}.t*')
+
+        try:
+            tarball = str(next(chroots))
+            adtlog.debug(f'Using {tarball=}')
+        except StopIteration:
+            adtlog.error(f'Unable to find chroot in {xdg_cache_home}')
+
+    if args.bind:
+        for olddir, newdir in args.bind:
+            if not os.path.isdir(olddir):
+                adtlog.error(f"{olddir} doesn't exist")
+                sys.exit(1)
+            if not os.path.isabs(newdir):
+                adtlog.error(f"mountpoint {newdir} must be an absolute path inside the chroot")
+                sys.exit(1)
+        bind_mount = args.bind
+
+    if args.debug:
+        adtlog.verbosity = 2
+
+    if args.unpack_dir:
+        rootdir = args.unpack_dir
+        os.makedirs(rootdir)
+    else:
+        rootdir = tempfile.mkdtemp(prefix=args.prefix)
+
+
+def hook_open():
+    # Unpack the tarball into the new directory.
+    # Make sure not to extract any character special files because we cannot
+    # mknod.
+    srootdir = shlex.quote(rootdir)
+    shellcommand = """
+    tar --exclude=./dev --directory {rootdir} --extract --file {tarball}
+    /usr/sbin/useradd --create-home --root {rootdir} unshare
+    """.format(rootdir=srootdir, tarball=tarball)
+    VirtSubproc.check_exec(['unshare', '--map-auto', '--map-root-user',
+                            'sh', '-c', shellcommand])
+
+    argv = [
+        'unshare',
+        '--map-auto',
+        '--map-root-user',
+        '--user',
+        '--mount',
+        '--',
+        os.path.join(VirtSubproc.PKGDATADIR, 'lib', 'unshare-helper'),
+        rootdir,
+    ]
+
+    for olddir, newdir in bind_mount:
+        argv.extend(['--bind', olddir, newdir])
+
+    argv.append('--')
+
+    adtlog.debug('auxverb is: %s' % argv)
+    VirtSubproc.auxverb = argv
+
+
+def hook_downtmp(path):
+    global capabilities
+
+    tmp = VirtSubproc.downtmp_mktemp(path)
+
+    capabilities.append(f'downtmp-host={rootdir}/{tmp}')
+
+    return tmp
+
+
+def hook_revert():
+    hook_cleanup()
+    os.makedirs(rootdir)
+    hook_open()
+
+
+def hook_cleanup():
+    global capabilities
+
+    VirtSubproc.check_exec(['unshare', '--map-auto', '--map-root-user', 'rm',
+                            '-rf', rootdir])
+
+    capabilities = [c for c in capabilities if not c.startswith('downtmp-host')]
+
+
+def hook_capabilities():
+    return capabilities
+
+
+parse_args()
+VirtSubproc.main()

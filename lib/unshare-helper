@@ -1,0 +1,67 @@
+#!/bin/sh
+# Copyright © 2016 Johannes Schauer
+# Copyright © 2022 Jochen Sprickerhof
+# Copyright © 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# A shell script that prepares the environment for autopkgtest-virt-unshare
+# by bind-mounting all the important things.
+
+set -eu
+
+rootdir="$1"
+shift
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        (--bind)
+            olddir="$2"
+            newdir="$3"
+            case "$newdir" in
+                (/*)
+                    ;;
+                (*)
+                    echo "internal error: not an absolute path: $newdir" >&2
+                    exit 125
+                    ;;
+            esac
+            mkdir -p "$rootdir$newdir"
+            mount -o rbind "$olddir" "$rootdir$newdir"
+            shift 3
+            ;;
+
+        (--)
+            shift
+            break
+            ;;
+
+        (*)
+            echo "internal error: argument not understood: $1" >&2
+            exit 125
+            ;;
+    esac
+done
+
+mkdir -p "$rootdir/dev"
+for f in null zero full random urandom tty console; do
+    touch "$rootdir/dev/$f"
+    # The chmod is done such that somebody accidentally using the chroot
+    # without the right bind-mounts will not fill up their disk.
+    chmod -rwx "$rootdir/dev/$f"
+    mount -o bind "/dev/$f" "$rootdir/dev/$f"
+done
+ln -sfT /proc/self/fd "$rootdir/dev/fd"
+ln -sfT /proc/self/fd/0 "$rootdir/dev/stdin"
+ln -sfT /proc/self/fd/1 "$rootdir/dev/stdout"
+ln -sfT /proc/self/fd/2 "$rootdir/dev/stderr"
+mkdir -p "$rootdir/dev/pts"
+mount -o noexec,nosuid,newinstance,gid=5,mode=620,ptmxmode=666 -t devpts none "$rootdir/dev/pts"
+ln -sfT /dev/pts/ptmx "$rootdir/dev/ptmx"
+mkdir -p "$rootdir/dev/shm"
+mount -t tmpfs tmpfs "$rootdir/dev/shm"
+mkdir -p "$rootdir/sys"
+mount -o rbind /sys "$rootdir/sys"
+
+exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SHELL=/bin/sh \
+unshare --root "$rootdir" --ipc --mount --pid --uts --cgroup --fork --mount-proc \
+"$@"

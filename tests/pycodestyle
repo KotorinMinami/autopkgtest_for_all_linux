@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+testdir="$(dirname "$(readlink -f "$0")")"
+rootdir="$(dirname "$testdir")"
+check=$(command -v pycodestyle || command -v pep8)
+status=0
+
+"$check" --ignore E402,E501,W504 \
+    "$rootdir"/lib/*.py \
+    "$rootdir"/tools/autopkgtest-build-docker \
+    "$rootdir"/tools/autopkgtest-build-qemu \
+    "$rootdir"/tools/autopkgtest-buildvm-ubuntu-cloud \
+|| status=$?
+
+for v in chroot docker null schroot lxc lxd qemu ssh unshare; do
+    "$check" --ignore E501,E402,W504 "$rootdir/virt/autopkgtest-virt-$v" || status=$?
+done
+
+"$check" --ignore E501,E402,W504 \
+    "$rootdir/runner/autopkgtest" \
+    "$testdir/autopkgtest" \
+    "$testdir/autopkgtest_args" \
+    "$testdir/qemu" \
+    "$testdir/testdesc" \
+    "$testdir"/*.py || status=$?
+
+exit "$status"

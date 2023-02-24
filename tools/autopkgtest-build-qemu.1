@@ -1,0 +1,187 @@
+.TH autopkgtest-build-qemu 1 2014 "Linux Programmer's Manual"
+.SH NAME
+autopkgtest-build-qemu \- Create autopkgtest virtual machine images for autopkgtest-virt-qemu
+
+.SH SYNOPSIS
+.B autopkgtest-build-qemu
+.RI [ OPTIONS ]
+.I RELEASE
+.I IMAGE
+.RI [ MIRROR ]
+.RI [ ARCHITECTURE ]
+.RI [ SCRIPT ]
+.RI [ SIZE ]
+
+.SH DESCRIPTION
+.B autopkgtest-build-qemu
+creates virtual machine images suitable for use with autopkgtest's QEMU runner
+\fBautopkgtest-virt-qemu\fR(1).
+
+Under the hood, it uses \fBvmdb2\fR(1) to create the images.
+
+Note that you need to call this as root, unless \fBfakemachine\fR(1) is
+available. fakemachine is currently only available on x86_64.
+
+.SH POSITIONAL PARAMETERS
+
+.TP
+.I RELEASE
+
+The release to download from the
+.IR MIRROR .
+This parameter is required.
+
+.TP
+.I IMAGE
+
+The file to write, in qcow2 format. This parameter is required.
+
+.SH OPTIONS
+
+.TP
+.BI --mirror= MIRROR
+
+Specify which distribution to install.
+It defaults to  \fIhttp://deb.debian.org/debian\fR (i.e. Debian), but you can
+pass a mirror of any Debian derivative.
+
+The third positional parameter is a deprecated way to specify this.
+
+.TP
+.BI --architecture= ARCHITECTURE
+
+Set the architecture for the virtual machine
+image, specified as a
+.BR dpkg (1)
+architecture. If omitted, the host architecture is assumed.
+
+.BI --arch= ARCH
+is an alias for this option.
+
+The fourth positional parameter is a deprecated way to specify this.
+
+.TP
+.BI --script= SCRIPT
+
+Specifies a user script that will be called with the
+root filesystem of the image as its first parameter. This script can them make
+any necesssary modifications to the root filesystem.
+
+The script must be a POSIX shell script,
+and should not depend on bash-specific features. This script will be executed
+inside a \fBchroot\fR(1) call in the virtual machine root filesystem.
+
+The fifth positional parameter is a deprecated way to specify this.
+
+.TP
+.BI --size= SIZE
+
+Specifies the image size for the virtual machine, defaulting to 25G.
+
+The sixth positional parameter is a deprecated way to specify this.
+
+.TP
+.BI --apt-proxy= PROXY
+
+Specify an apt proxy to use in the virtual machine.
+By default, if you have an apt proxy configured on the host, the
+virtual machine will automatically use this, otherwise there is no default.
+
+.B --apt-proxy=DIRECT
+can be used to force an apt proxy on the host to be ignored.
+
+.TP
+.BR --boot=auto | bios | efi | ieee1275 | none
+
+Select the way the generated image will expect to be booted.
+
+.B auto
+chooses a suitable boot mode for the architecture, and is the default.
+
+.B bios
+installs an x86 BIOS bootloader on i386 or amd64.
+.B auto
+selects this mode on i386 or amd64.
+
+.B efi
+installs an EFI bootloader on any architecture for which
+.BR vmdb2(1)
+supports it, which currently means amd64, arm64, armhf or i386. The
+.B --efi
+option is an alias for this mode.
+.B auto
+selects this mode on arm64 or armhf.
+
+.B ieee1275
+installs an IEEE 1275 (OpenFirmware) bootloader on ppc64el.
+.B auto
+selects this mode on ppc64el.
+
+.B none
+does not do anything special. The image will not be bootable unless
+the specified
+.B --script
+arranges for a suitable bootloader to be installed, or the
+.BR autopkgtest-virt-qemu (1)
+.B --qemu-options
+boot the image specially (for example by specifying a kernel directly).
+
+.SH ENVIRONMENT
+
+If the
+.B $AUTOPKGTEST_KEEP_APT_SOURCES
+environment variable is set to a non-empty value,
+.B autopkgtest-build-qemu
+will keep whatever
+.B /etc/apt/sources.list
+was created by
+.BR debootstrap .
+
+Otherwise, if the
+.B $AUTOPKGTEST_APT_SOURCES_FILE
+environment variable is set to a non-empty value,
+for example
+.BR AUTOPKGTEST_APT_SOURCES_FILE=/home/me/mydistro/sources.list ,
+then
+.B autopkgtest-build-qemu
+will read that file (on the host system) and use it to populate
+.B /etc/apt/sources.list
+in the virtual machine; or if the
+.B $AUTOPKGTEST_APT_SOURCES
+environment variable is set to a non-empty value, for example
+.BR "AUTOPKGTEST_APT_SOURCES=$(cat /home/me/mydistro/sources.list)" ,
+.B autopkgtest-build-qemu
+will write it directly into
+.B /etc/apt/sources.list
+in the virtual machine.
+
+You can specify an apt proxy to use in the virtual machine in the
+.B $AUTOPKGTEST_APT_PROXY
+environment variable. If you have an apt proxy configured on the host, the
+virtual machine will automatically use this, otherwise there is no default.
+
+.SH EXAMPLES
+
+# autopkgtest-build-qemu unstable /path/to/debian-unstable.img
+
+.PP
+$ sudo autopkgtest-build-qemu stable /path/to/debian-stable-i386.img i386
+
+.PP
+$ sudo autopkgtest-build-qemu bionic /path/to/ubuntu-bionic.img http://archive.ubuntu.com/ubuntu
+
+.SH SEE ALSO
+\fBautopkgtest-virt-qemu\fR(1),
+\fBvmdb2\fR(1),
+\fBautopkgtest\fR(1),
+\fB/usr/share/doc/autopkgtest/\fR.
+
+.SH AUTHORS AND COPYRIGHT
+.B autopkgtest-build-qemu
+was written by Antonio Terceiro <terceirio@debian.org>
+
+This manpage is part of autopkgtest, a tool for testing Debian binary
+packages.  autopkgtest is Copyright (C) 2006-2018 Canonical Ltd and others.
+
+See \fB/usr/share/doc/autopkgtest/CREDITS\fR for the list of
+contributors and full copying conditions.

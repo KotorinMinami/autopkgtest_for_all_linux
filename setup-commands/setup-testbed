@@ -1,0 +1,528 @@
+#!/bin/sh
+# setup-testbed is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# autopkgtest is Copyright (C) 2006-2014 Canonical Ltd.
+#
+# Setup script for e. g. vmdebootstrap, generic Debian/Ubuntu VM or container
+# images to start a root serial console on ttyS1, set up networking for
+# ethernet, configure apt sources, install necessary and clean up unnecessary
+# packages, etc. This can be used both for building tailored autopkgtest images
+# as well as on a per-test basis as --setup-commands script (then some steps
+# will be skipped).
+#
+# See autopkgtest-virt-qemu(1) for details how to use this with vmdeboostrap.
+#
+# You can set $AUTOPKGTEST_APT_PROXY; if set, it will be configured in apt in
+# /etc/apt/apt.conf.d/01proxy. If you have an apt proxy configured on the host,
+# it will be used automatically, unless $AUTOPKGTEST_APT_PROXY is set.
+#
+# You can set $MIRROR to change the default apt mirror.
+
+set -eu
+
+# Created files should be readable by user (this script is called as root)
+umask 0022
+
+# avoid debconf hangs
+export DEBIAN_FRONTEND=noninteractive
+
+if [ "${1:-}" = "--help" ]; then
+    echo "Usage: $0 [chroot dir]"
+    echo "if chroot dir is not given, run on the main system (for running in VMs)"
+    exit 0
+fi
+
+root=${1:-/}
+need_update_initramfs=
+
+# Return true if $1 is correctly unpacked and configured.
+package_is_installed () {
+    # Debian Policy 10.4 says we have local even though it's non-POSIX
+    # shellcheck disable=SC3043
+    local status
+
+    # ${Status} is dpkg-query syntax, not a shell variable here
+    # shellcheck disable=SC2016
+    if ! status="$(chroot "$root" dpkg-query -W -f '${Status}' "$1" 2>/dev/null)"; then
+        return 1
+    fi
+
+    case "$status" in
+        (*\ installed)
+            return 0
+            ;;
+        (*)
+            return 1
+            ;;
+    esac
+}
+
+# Return true if $1 is present in some form (maybe removed but not purged).
+package_is_present () {
+    if ! chroot "$root" dpkg-query -W "$1" >/dev/null 2>/dev/null; then
+        return 1
+    fi
+
+    return 0
+}
+
+# set up init script for root shell on ttyS1; necessary for autopkgtest-virt-qemu local
+# images
+if [ "$root" != "/" ] || [ -e /dev/ttyS1 ] || [ -e /dev/hvc1 ]; then
+    mkdir -p "$root/etc/init.d"
+    cat <<EOF > "$root/etc/init.d/autopkgtest"
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          autopkgtest
+# Required-Start:    \$all
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+### END INIT INFO
+
+if [ "\$1" = start ]; then
+    for device in ttyS1 hvc1; do
+        if [ -e "/dev/\$device" ]; then
+            echo "Starting root shell on \$device for autopkgtest"
+            (setsid sh <"/dev/\$device" >"/dev/\$device" 2>&1) &
+        fi
+    done
+fi
+EOF
+
+    chmod 755 "$root/etc/init.d/autopkgtest"
+    chroot "$root" update-rc.d autopkgtest defaults
+
+    if [ -n "${AUTOPKGTEST_BUILD_QEMU:-}" ]; then
+        mkdir -p "$root/etc/initramfs-tools/hooks"
+        cat <<EOF > "$root/etc/initramfs-tools/hooks/autopkgtest-build-qemu"
+#!/bin/sh
+set -e
+PREREQ=""
+
+prereqs () {
+    echo "\${PREREQ}"
+}
+
+case "\${1}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+manual_add_modules virtio_console
+exit 0
+EOF
+        chmod 755 "$root/etc/initramfs-tools/hooks/autopkgtest-build-qemu"
+        need_update_initramfs=yes
+    fi
+
+    cat <<EOF > "$root/etc/systemd/system/autopkgtest@.service"
+[Unit]
+Description=autopkgtest root shell on %I
+ConditionPathExists=/dev/%I
+
+[Service]
+ExecStart=/bin/sh
+StandardInput=tty-fail
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/%I
+SendSIGHUP=yes
+# ignore I/O errors on unusable tty
+SuccessExitStatus=0 208 SIGHUP SIGINT SIGTERM SIGPIPE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    # Mask the unit generated for /etc/init.d/autopkgtest
+    ln -sf /dev/null "$root/etc/systemd/system/autopkgtest.service"
+
+    mkdir -p "$root/etc/systemd/system/multi-user.target.wants"
+    for device in ttyS1 hvc1; do
+        ln -sf ../autopkgtest@.service "$root/etc/systemd/system/multi-user.target.wants/autopkgtest@${device}.service"
+    done
+fi
+
+# serial console for upstart
+if [ -e "$root/etc/init/tty2.conf" ] && ! [ -e "$root/etc/init/ttyS0.conf" ]; then
+    sed 's/tty2/ttyS0/g; s! *exec.*$!exec /sbin/getty -L ttyS0 115200 vt102!' \
+        "$root/etc/init/tty2.conf" > "$root/etc/init/ttyS0.conf"
+fi
+
+ARCH="$(chroot "$root" dpkg --print-architecture)"
+
+# Note that whichever console is specified *last* is the one we will get
+# if we open /dev/console. See
+# <https://www.kernel.org/doc/Documentation/admin-guide/serial-console.rst>
+case "$ARCH" in
+    (amd64|i386)
+        consoles="console=tty0 console=hvc0 console=ttyS0"
+        ;;
+
+    (arm*)
+        consoles="console=tty0 console=hvc0 console=ttyAMA0"
+        ;;
+
+    (ppc64*)
+        consoles="console=tty0 console=hvc0"
+        ;;
+
+    (*)
+        echo "Unknown architecture, assuming PC-style ttyS0" >&2
+        # Let's make /dev/hvc0 the primary console for new architectures
+        consoles="console=tty0 console=ttyS0 console=hvc0"
+        ;;
+esac
+
+# serial console for systemd
+# bump vmalloc on i386, necessary for tests like udisks2
+if [ ! -e "$root/etc/default/grub.d/90-autopkgtest.cfg" ] && chroot "$root" which update-grub >/dev/null 2>&1; then
+    changed=
+    if [ -d "$root/etc/default/grub.d" ]; then
+        if [ "$ARCH" = "i386" ]; then
+            echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$consoles vmalloc=512M\"" > \
+                "$root/etc/default/grub.d/90-autopkgtest.cfg"
+            changed=1
+        elif [ "$ARCH" = "amd64" ]; then
+            echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$consoles\"" > \
+                "$root/etc/default/grub.d/90-autopkgtest.cfg"
+            changed=1
+        fi
+    else
+        # fallback for Ubuntu 12.04
+        if [ "$ARCH" = "i386" ]; then
+            sed -i "/CMDLINE_LINUX_DEFAULT/ s/\"$/ $consoles vmalloc=512M\"/" "$root/etc/default/grub"
+            changed=1
+        elif [ "$ARCH" = "amd64" ]; then
+            sed -i "/CMDLINE_LINUX_DEFAULT/ s/\"$/ $consoles\"/" "$root/etc/default/grub"
+            changed=1
+        fi
+        if ! grep -q GRUB_HIDDEN_TIMEOUT=0 "$root/etc/default/grub" ; then
+            sed -i '/^GRUB_TIMEOUT=/ s/=.*$/=1/' "$root/etc/default/grub"
+            changed=1
+        fi
+    fi
+    [ -z "${changed:-}" ] || chroot "$root" update-grub || echo "WARNING: update-grub failed!"
+fi
+
+# set up apt sources
+if [ -e "$root/etc/os-release" ]; then
+    # shellcheck disable=SC1090 disable=SC1091
+    DISTRO_ID=$(. "$root/etc/os-release" && echo "$ID" || echo INVALID)
+fi
+if [ -z "${MIRROR:-}" ]; then
+    MIRROR=$(chroot "$root" awk '/^deb .*'"$DISTRO_ID"'/ { sub(/\[.*\]/, "", $0); print $2; exit }' "/etc/apt/sources.list" || :)
+fi
+if [ -z "${RELEASE:-}" ]; then
+    RELEASE=$(chroot "$root" awk '/^deb .*'"$DISTRO_ID"'/ { sub(/\[.*\]/, "", $0); print $3; exit }' "/etc/apt/sources.list" || :)
+fi
+
+if [ -n "${AUTOPKGTEST_KEEP_APT_SOURCES:-}" ]; then
+    echo "$0: Keeping existing apt sources" >&2
+elif [ -n "${AUTOPKGTEST_APT_SOURCES_FILE:-}" ]; then
+    echo "$0: Copying apt sources from $AUTOPKGTEST_APT_SOURCES_FILE" >&2
+    install -m644 "$AUTOPKGTEST_APT_SOURCES_FILE" "$root/etc/apt/sources.list"
+    rm -fr "$root/etc/apt/sources.list.d"
+    mkdir "$root/etc/apt/sources.list.d"
+elif [ -n "${AUTOPKGTEST_APT_SOURCES:-}" ]; then
+    echo "$0: Setting apt sources from \$AUTOPKGTEST_APT_SOURCES" >&2
+    printf '%s\n' "$AUTOPKGTEST_APT_SOURCES" > "$root/etc/apt/sources.list"
+    rm -fr "$root/etc/apt/sources.list.d"
+    mkdir "$root/etc/apt/sources.list.d"
+else
+    echo "$0: Attempting to set up Debian/Ubuntu apt sources automatically" >&2
+
+    if [ -z "$RELEASE" ]; then
+        # Deliberately not expanding $RELEASE here
+        # shellcheck disable=SC2016
+        echo 'Failed to auto-detect distribution release name; set $RELEASE explicitly' >&2
+        exit 1
+    fi
+    if [ -z "$MIRROR" ]; then
+        # Deliberately not expanding $MIRROR here
+        # shellcheck disable=SC2016
+        echo 'Failed to auto-detect apt mirror; set $MIRROR explicitly' >&2
+        exit 1
+    fi
+    if [ "${MIRROR%ubuntu*}" != "$MIRROR" ]; then
+        echo "$0: Distribution appears to be Ubuntu" >&2
+        cat << EOF > "$root/etc/apt/sources.list"
+deb     $MIRROR ${RELEASE} main restricted universe multiverse
+deb     $MIRROR ${RELEASE}-updates main restricted universe multiverse
+deb     $MIRROR ${RELEASE}-security main restricted universe multiverse
+deb-src $MIRROR ${RELEASE} main restricted universe multiverse
+deb-src $MIRROR ${RELEASE}-updates main restricted universe multiverse
+deb-src $MIRROR ${RELEASE}-security main restricted universe multiverse
+EOF
+    else
+        echo "$0: Distribution assumed to resemble Debian" >&2
+        cat << EOF > "$root/etc/apt/sources.list"
+deb     $MIRROR $RELEASE main contrib non-free
+deb-src $MIRROR $RELEASE main contrib non-free
+EOF
+    fi
+    rm -fr "$root/etc/apt/sources.list.d"
+    mkdir "$root/etc/apt/sources.list.d"
+fi
+
+# prevent subsequent cloud-init runs from modifying the apt sources again
+if [ -e "$root/etc/cloud/cloud.cfg" ]; then
+    mkdir -p "$root/etc/cloud/cloud.cfg.d"
+    echo 'apt_preserve_sources_list: true' >> "$root/etc/cloud/cloud.cfg.d/01_autopkgtest.cfg"
+    cat << EOF > "$root/etc/cloud/cloud.cfg.d/02_autopkgtest_new.cfg"
+apt:
+    preserve_sources_list: true
+EOF
+
+fi
+
+# set up networking
+if [ -z "${AUTOPKGTEST_IS_SETUP_COMMAND:-}" ] &&
+       [ -e "$root"/etc/network/interfaces ] &&
+       ! ls "$root"/etc/systemd/network/*.network >/dev/null 2>&1 &&
+       ! ls "$root"/etc/netplan/*.yaml >/dev/null 2>&1; then
+    if ! grep -q 'source.*interfaces.d' "$root/etc/network/interfaces"; then
+        printf "\nsource-directory /etc/network/interfaces.d\n" >> "$root/etc/network/interfaces"
+    fi
+
+    IFACE=""
+    if [ "$root" = / ] ; then
+        # we are already in a VM, so figure out our network device
+        if OUT="$(cd /sys/class/net; ls -d e* 2>/dev/null)"; then
+            IFACE="${OUT# *}"
+        fi
+    else
+        # the kernel will choose eth0 as the interface name, so
+        # keep that (and tell udev to not rename the interface,
+        # we won't know how it will be called)
+        IFACE="eth0"
+        if ! [ -e "$root/etc/udev/rules.d/80-net-setup-link.rules" ] ; then
+            ln -s /dev/null "$root/etc/udev/rules.d/80-net-setup-link.rules"
+            need_update_initramfs=yes
+        fi
+    fi
+    if [ -n "$IFACE" ] ; then
+        mkdir -p "$root/etc/network/interfaces.d"
+        if ! grep -h -r "^[[:space:]]*auto.*$IFACE" "$root/etc/network/interfaces" "$root/etc/network/interfaces.d" | grep -qv 'auto[[:space:]]*lo'; then
+            printf 'auto %s\niface %s inet dhcp\n' "$IFACE" "$IFACE" >> "$root/etc/network/interfaces.d/$IFACE"
+        fi
+    fi
+fi
+
+# go-faster apt/dpkg
+echo "Acquire::Languages \"none\";" > "$root"/etc/apt/apt.conf.d/90nolanguages
+echo 'force-unsafe-io' > "$root"/etc/dpkg/dpkg.cfg.d/autopkgtest
+
+# avoid failures do to transient timeouts
+echo 'Acquire::Retries "10";' > "$root"/etc/apt/apt.conf.d/90retry
+
+# Set up apt proxy for setup, if given.
+# Unlike AUTOPKGTEST_APT_PROXY, this is expected to be a proxy that is
+# valid both during setup and during use.
+if [ -n "${AUTOPKGTEST_SETUP_APT_PROXY-}" ]; then
+    echo "Acquire::http { Proxy \"$AUTOPKGTEST_SETUP_APT_PROXY\"; };" > "$root"/etc/apt/apt.conf.d/01autopkgtest-setup-proxy
+fi
+
+# support backwards compatible env var too
+AUTOPKGTEST_APT_PROXY=${AUTOPKGTEST_APT_PROXY:-${ADT_APT_PROXY:-}}
+
+# detect apt proxy on the host (in chroot mode)
+if [ "$root" != "/" ] && [ -z "$AUTOPKGTEST_APT_PROXY" ] && command -v apt-config; then
+    RES=$(apt-config shell proxy Acquire::http::Proxy)
+    if [ -n "$RES" ]; then
+        # evaluating $RES will set proxy, but shellcheck can't know that
+        proxy=
+        eval "$RES"
+        if echo "$proxy" | grep -E -q '(localhost|127\.0\.0\.[0-9]*)'; then
+            AUTOPKGTEST_APT_PROXY=$(echo "$proxy" | sed -r "s#localhost|127\.0\.0\.[0-9]*#10.0.2.2#")
+        elif [ -n "${proxy:-}" ]; then
+            AUTOPKGTEST_APT_PROXY="$proxy"
+        fi
+    fi
+fi
+
+# Ensure chroot has a working resolv.conf; it might be a symlink on the host
+if [ "$root" != "/" ] && [ -e /etc/resolv.conf ]; then
+    if [ -e "$root/etc/resolv.conf" ] || [ -L "$root/etc/resolv.conf" ]; then
+        mv "$root/etc/resolv.conf" "$root/etc/resolv.conf.vmdebootstrap"
+    fi
+    cat /etc/resolv.conf > "$root/etc/resolv.conf"
+    trap 'if [ -e "$root/etc/resolv.conf.vmdebootstrap" ]; then mv "$root/etc/resolv.conf.vmdebootstrap" "$root/etc/resolv.conf"; fi' EXIT INT QUIT PIPE
+fi
+
+if [ -z "${AUTOPKGTEST_IS_SETUP_COMMAND:-}" ]; then
+    chroot "$root" apt-get update || (sleep 15; chroot "$root" apt-get update)
+fi
+
+# Optionally set up an init system.
+# This can be used to swap a normally-systemd qemu image to sysv-rc,
+# or to add systemd to a Docker/Podman image that does not normally have
+# an init system.
+if [ -z "${AUTOPKGTEST_IS_SETUP_COMMAND:-}" ]; then
+    case "${AUTOPKGTEST_SETUP_INIT_SYSTEM-}" in
+        ('')
+            ;;
+
+        (systemd | systemd-sysv)
+            packages="init systemd-sysv"
+
+            if chroot "$root" apt-cache show libpam-systemd >/dev/null 2>&1; then
+                packages="$packages libpam-systemd"
+            fi
+
+            # Deliberately word-splitting:
+            # shellcheck disable=SC2086
+            chroot "$root" apt-get install -y $packages < /dev/null
+            rm -f "$root/usr/sbin/policy-rc.d"
+            ;;
+
+        (sysv-rc | openrc | sysvinit | sysvinit-core)
+            # procps is not strictly mandatory, but lib/await-boot.sh needs it
+            packages="init sysvinit-core procps"
+
+            case "$AUTOPKGTEST_SETUP_INIT_SYSTEM" in
+                (sysvinit*)
+                    ;;
+                (*)
+                    packages="$packages $AUTOPKGTEST_SETUP_INIT_SYSTEM"
+                    ;;
+            esac
+
+            if chroot "$root" apt-cache show libpam-elogind >/dev/null 2>&1; then
+                packages="$packages libpam-elogind"
+            fi
+
+            # Deliberately word-splitting:
+            # shellcheck disable=SC2086
+            chroot "$root" apt-get install -y $packages < /dev/null
+            rm -f "$root/usr/sbin/policy-rc.d"
+            ;;
+
+        (*)
+            echo "Error: unsupported init system AUTOPKGTEST_SETUP_INIT_SYSTEM=$AUTOPKGTEST_SETUP_INIT_SYSTEM"
+            exit 1
+            ;;
+    esac
+
+    # serial console for sysvinit
+    if [ -e "$root/etc/inittab" ] && ! grep '^T0:' "$root/etc/inittab" > /dev/null; then
+        echo "T0:23:respawn:/sbin/getty -L ttyS0 115200 vt100" >> "$root/etc/inittab"
+    fi
+fi
+
+# install some necessary packages
+
+# eatmydata for fast dpkg
+chroot "$root" apt-get install -y eatmydata < /dev/null
+
+if [ -x /sbin/init ]; then
+    # lot of tests expect a logind session
+    chroot "$root" apt-get install -y dbus < /dev/null
+
+    if package_is_installed systemd && ! package_is_installed libpam-systemd && chroot "$root" apt-cache show libpam-systemd >/dev/null 2>&1; then
+        chroot "$root" apt-get install -y libpam-systemd </dev/null
+    fi
+
+    # some tests use a lot of /dev/random, avoid hangs
+    if ! systemd-detect-virt --quiet --container; then
+        chroot "$root" apt-get install -y rng-tools </dev/null
+    fi
+fi
+
+# optimization as we need to install it for most tests anyway
+if ! package_is_installed dpkg-dev; then
+    chroot "$root" apt-get install -y --no-install-recommends dpkg-dev </dev/null
+fi
+
+# upgrade and trim image (not for --setup-command)
+if [ -z "${AUTOPKGTEST_IS_SETUP_COMMAND:-}" ]; then
+    if package_is_present cloud-init; then
+        have_cloudinit=1
+    else
+        have_cloudinit=
+    fi
+
+    # clean up bloat from Ubuntu cloud images when building an image
+    purge_list=''
+    for p in accountsservice apt-xapian-index cryptsetup landscape-client \
+             landscape-common open-vm-tools w3m vim-runtime aptitude-common \
+             command-not-found-data manpages ntfs-3g sosreport \
+             ubuntu-release-upgrader-core libcpan-changes-perl git \
+             cgmanager lxc-common lxc lxd lxd-client open-iscsi mdadm dmeventd lvm2 \
+             unattended-upgrades update-notifier-common ureadahead debootstrap \
+             lxcfs ppp pppconfig pppoeconf snapd snap-confine ubuntu-core-launcher \
+             thermald xdg-user-dirs zerofree xml-core needrestart; do
+        if package_is_present "$p"; then
+            purge_list="$purge_list $p"
+        fi
+    done
+    if [ -n "$purge_list" ]; then
+        # Deliberately word-splitting $purge_list:
+        # shellcheck disable=SC2086
+        chroot "$root" eatmydata apt-get --auto-remove -y purge $purge_list || true
+    fi
+
+    if [ "${AUTOPKGTEST_SETUP_VM_UPGRADE:-}" != "false" ]; then
+        chroot "$root" eatmydata apt-get -o Dpkg::Options::="--force-confold" -y dist-upgrade </dev/null
+        chroot "$root" eatmydata apt-get -o Dpkg::Options::="--force-confold" -y --purge autoremove </dev/null
+    fi
+
+    # ensure cloud-init is still installed
+    [ -z "${have_cloudinit:-}" ] || chroot "$root" eatmydata apt-get install -y cloud-init </dev/null
+else
+    # we want to keep cloud-init on autopkgtest images for instantiating, but not
+    # on test instances themselves as it often gets in the way
+    if package_is_present cloud-init; then
+        chroot "$root" eatmydata apt-get --auto-remove -y purge cloud-init || true
+    fi
+fi
+
+if grep -q buntu "$root/etc/os-release" "$root/etc/lsb-release"; then
+    if ls "$root"/boot/vmlinu* >/dev/null 2>&1; then
+        # provides kmods like scsi_debug or mac80211_hwsim on Ubuntu
+        chroot "$root" eatmydata apt-get install -y linux-generic < /dev/null
+    else
+        if [ "$RELEASE" = precise ] && [ "$ARCH" = armhf ]; then
+            # no linux-image-generic in precise/armhf yet
+            chroot "$root" eatmydata apt-get install -y linux-headers-omap < /dev/null
+        else
+            chroot "$root" eatmydata apt-get install -y linux-headers-generic < /dev/null
+        fi
+    fi
+fi
+
+# we need Python to run the auxverb helper
+if ! chroot "$root" sh -c 'type python3 >/dev/null 2>&1 || type python >/dev/null 2>&1'; then
+    chroot "$root" eatmydata apt-get install -y --no-install-recommends python3-minimal < /dev/null
+fi
+
+# run post-install commands
+if [ -n "${AUTOPKGTEST_SETUP_VM_POST_COMMAND:-}" ]; then
+    chroot "$root" sh -ec "$AUTOPKGTEST_SETUP_VM_POST_COMMAND"
+fi
+
+if [ -z "${AUTOPKGTEST_IS_SETUP_COMMAND:-}" ]; then
+    chroot "$root" apt-get clean
+fi
+
+rm -f "$root"/etc/apt/apt.conf.d/01autopkgtest-setup-proxy
+
+# set up apt proxy, if given (this might be an IP which only works in the VM,
+# so don't run the previous apt-get with that already)
+if [ -n "$AUTOPKGTEST_APT_PROXY" ]; then
+    echo "Acquire::http { Proxy \"$AUTOPKGTEST_APT_PROXY\"; };" > "$root"/etc/apt/apt.conf.d/01proxy
+fi
+
+# avoid cron interference with apt-get update
+echo 'APT::Periodic::Enable "0";' > "$root/etc/apt/apt.conf.d/02periodic"
+
+# always include phased updates, so that the output is what we expect.
+echo 'APT::Get::Always-Include-Phased-Updates "true";' > "$root/etc/apt/apt.conf.d/90always-include-phased-updates"
+
+if [ -n "$need_update_initramfs" ]; then
+    chroot "$root" update-initramfs -u
+fi

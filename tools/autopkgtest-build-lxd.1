@@ -1,0 +1,93 @@
+.TH autopkgtest-build-lxd 1 2015 "Linux Programmer's Manual"
+.SH NAME
+autopkgtest-build-lxd \- Create or update autopkgtest container for autopkgtest-virt-lxd
+
+.SH SYNOPSIS
+.B autopkgtest-build-lxd
+.I image
+
+.SH DESCRIPTION
+.B autopkgtest-build-lxd
+creates or updates an LXD image which is optimized for autopkgtest's LXD runner
+.BR autopkgtest-virt-lxd (1).
+
+It builds a temporary container from an existing given image, runs
+autopkgtest's standard
+.B setup-commands/setup-testbed
+script, and publishes it as a new image with the alias
+\fBautopkgtest/\fIdistro\fR/\fIrelease\fR/\fIarchitecture\fR.
+
+.SH OPTIONS
+
+.TP
+.B -h | --help
+Display help message and exit.
+
+.TP
+.B --vm
+Prepare a VM image instead of a container image, to be used with
+\fBautopkgtest-virt-lxd --vm\fR.
+
+.SH ENVIRONMENT
+
+If the
+.B $AUTOPKGTEST_KEEP_APT_SOURCES
+environment variable is set to a non-empty value,
+.B autopkgtest-build-lxd
+will keep whatever
+.B /etc/apt/sources.list
+was present in the existing image.
+
+Otherwise, if the
+.B $AUTOPKGTEST_APT_SOURCES_FILE
+environment variable is set to a non-empty value,
+for example
+.BR AUTOPKGTEST_APT_SOURCES_FILE=/home/me/mydistro/sources.list ,
+then
+.B autopkgtest-build-lxd
+will read that file (on the host system) and use it to populate
+.B /etc/apt/sources.list
+in the container; or if the
+.B $AUTOPKGTEST_APT_SOURCES
+environment variable is set to a non-empty value, for example
+.BR "AUTOPKGTEST_APT_SOURCES=$(cat /home/me/mydistro/sources.list)" ,
+.B autopkgtest-build-lxd
+will write it directly into
+.B /etc/apt/sources.list
+in the container.
+
+You can specify an apt proxy to use in the container in the
+.B $AUTOPKGTEST_APT_PROXY
+environment variable. If you have an apt proxy configured on the host, the
+container will automatically use this, otherwise there is no default.
+
+For dist-upgrading \fIimage\fR to a newer release you can specify the
+destination release in the
+.B $RELEASE
+environment variable. This is useful when a new distribution series has just
+been opened and there are no standard images for that available yet.
+
+.SH EXAMPLE
+
+Build a local autopkgtest container image for Debian sid i386, based on the
+stock Debian image from the public
+.B images.linuxcontainers.org
+remote:
+
+$ autopkgtest-build-lxd images:debian/sid/i386
+
+.SH SEE ALSO
+\fBautopkgtest-virt-lxd\fR(1),
+\fBautopkgtest\fR(1),
+\fBlxc\fR(1),
+\fB/usr/share/doc/autopkgtest/\fR.
+
+.SH AUTHORS AND COPYRIGHT
+.B autopkgtest-build-lxd
+was written by Martin Pitt <martin.pitt@ubuntu.com>
+
+This manpage is part of autopkgtest, a tool for testing Debian binary
+packages.  autopkgtest is Copyright (C) 2006-2015 Canonical Ltd and others.
+
+See \fB/usr/share/doc/autopkgtest/CREDITS\fR for the list of
+contributors and full copying conditions.

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# enable-sudo [USERNAME...]
+# Implementation for the needs-sudo restriction.
+
+set -eu
+
+usage () {
+    echo "Usage: enable-sudo [USERNAME...]" >&2
+    exit 2
+}
+
+# Check for options for future-proofing, but none are actually accepted
+case "${1-}" in
+    (--)
+        shift
+        ;;
+
+    (-*)
+        usage
+        ;;
+esac
+
+if [ "$#" -gt 0 ]; then
+    for user in "$@"; do
+        usermod -a -G sudo "$user"
+    done
+elif [ -n "${AUTOPKGTEST_NORMAL_USER-}" ]; then
+    usermod -a -G sudo "$AUTOPKGTEST_NORMAL_USER"
+fi
+
+tmpdir="$(mktemp -d)"
+
+echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" > "$tmpdir/sudoers"
+install -d /etc/sudoers.d
+install -m440 "$tmpdir/sudoers" /etc/sudoers.d/autopkgtest-needs-sudo
+
+rm -fr "$tmpdir"

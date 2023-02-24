@@ -1,0 +1,602 @@
+#!/usr/bin/python3
+
+# autopkgtest-build-qemu is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# Copyright (C) 2016-2020 Antonio Terceiro <terceiro@debian.org>.
+# Copyright (C) 2019 Sébastien Delafond
+# Copyright (C) 2019-2020 Simon McVittie
+# Copyright (C) 2020 Christian Kastner
+#
+# Build a QEMU image for using with autopkgtest
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import argparse
+import json
+import logging
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from contextlib import (suppress)
+from tempfile import (TemporaryDirectory)
+from typing import (Any, Dict, List, Optional)
+
+
+logger = logging.getLogger('autopkgtest-build-qemu')
+
+DATA_PATHS = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    '/usr/share/autopkgtest',
+)
+
+for p in DATA_PATHS:
+    sys.path.insert(0, os.path.join(p, 'lib'))
+
+DEBIAN_KERNELS = dict(
+    armhf='linux-image-armmp-lpae',
+    hppa='linux-image-parisc',
+    i386='linux-image-686-pae',
+    ppc64='linux-image-powerpc64',
+    ppc64el='linux-image-powerpc64le',
+)
+
+
+class UsageError(Exception):
+    pass
+
+
+class BuildQemu:
+    def __init__(self) -> None:
+        pass
+
+    def run(self) -> None:
+        default_arch = subprocess.check_output(
+            ['dpkg', '--print-architecture'],
+            universal_newlines=True
+        ).strip()
+        default_mirror = 'http://deb.debian.org/debian'
+
+        parser = argparse.ArgumentParser()
+
+        parser.add_argument(
+            '--architecture', '--arch',
+            default='',
+            help='dpkg architecture name [default: %s]' % default_arch,
+        )
+        parser.add_argument(
+            '--apt-proxy',
+            default='',
+            metavar='http://PROXY:PORT',
+            help='Set apt proxy [default: auto]',
+        )
+        parser.add_argument(
+            '--mirror',
+            default='',
+            metavar='URL',
+            help=(
+                'Debian or Debian derivative mirror ' +
+                '[default: %s]' % default_mirror
+            ),
+        )
+        parser.add_argument(
+            '--script',
+            default='',
+            dest='user_script',
+            help='Run an extra customization script',
+        )
+        parser.add_argument(
+            '--size',
+            default='',
+            help='Set image size [default: 25G]',
+        )
+        parser.add_argument(
+            '--boot',
+            default='auto',
+            choices=('auto', 'bios', 'efi', 'ieee1275', 'none'),
+            help=(
+                'Set up a bootloader for this boot protocol '
+                '[auto|bios|efi|ieee1275|none; default: auto]'
+            ),
+        )
+        parser.add_argument(
+            '--init',
+            default='auto',
+            choices=('auto', 'systemd', 'sysv-rc', 'openrc'),
+            help=(
+                'Boot using this init system '
+                '[auto|systemd|sysv-rc|openrc; default: auto]'
+            ),
+        )
+        parser.add_argument(
+            '--efi',
+            dest='boot',
+            action='store_const',
+            const='efi',
+            help='Alias for --boot=efi',
+        )
+        parser.add_argument(
+            'release',
+            metavar='RELEASE',
+            help='An apt suite or codename available from MIRROR',
+        )
+        parser.add_argument(
+            'image',
+            metavar='IMAGE',
+            help='Filename of qcow2 image to create',
+        )
+        parser.add_argument(
+            '_mirror',
+            default=None,
+            metavar='MIRROR',
+            nargs='?',
+            help='Deprecated, use --mirror instead',
+        )
+        parser.add_argument(
+            '_architecture',
+            default=None,
+            metavar='ARCHITECTURE',
+            nargs='?',
+            help='Deprecated, use --architecture instead',
+        )
+        parser.add_argument(
+            '_user_script',
+            default=None,
+            metavar='SCRIPT',
+            nargs='?',
+            help='Deprecated, use --script instead',
+        )
+        parser.add_argument(
+            '_size',
+            default=None,
+            metavar='SIZE',
+            nargs='?',
+            help='Deprecated, use --size instead',
+        )
+
+        args = parser.parse_args()
+        image = os.path.abspath(args.image)
+        env = {}    # type: Dict[str, str]
+
+        if args._mirror is not None:
+            if args.mirror:
+                parser.error(
+                    "--mirror and 3rd positional argument cannot both be "
+                    "specified"
+                )
+            else:
+                args.mirror = args._mirror
+
+        if args._architecture is not None:
+            if args.architecture:
+                parser.error(
+                    "--architecture and 4th positional argument cannot both "
+                    "be specified"
+                )
+            else:
+                args.architecture = args._architecture
+
+        if args._user_script is not None:
+            if args.user_script:
+                parser.error(
+                    "--script and 5th positional argument cannot both "
+                    "be specified"
+                )
+            else:
+                args.user_script = args._user_script
+
+        if args._size is not None:
+            if args.size:
+                parser.error(
+                    "--size and 6th positional argument cannot both "
+                    "be specified"
+                )
+            else:
+                args.size = args._size
+
+        vmdb2 = shutil.which('vmdb2')
+
+        if vmdb2 is None:
+            raise UsageError(
+                'vmdb2 not found. This script requires vmdb2 to be installed'
+            )
+
+        if not args.mirror:
+            args.mirror = default_mirror
+
+        if not args.architecture:
+            args.architecture = default_arch
+
+        if not args.size:
+            args.size = '25G'
+
+        if not args.apt_proxy:
+            args.apt_proxy = os.getenv(
+                'AUTOPKGTEST_APT_PROXY',
+                os.getenv('ADT_APT_PROXY', ''),
+            )
+
+        if not args.apt_proxy:
+            args.apt_proxy = subprocess.check_output(
+                'eval "$(apt-config shell p Acquire::http::Proxy)"; echo "$p"',
+                shell=True,
+                universal_newlines=True,
+            ).strip()
+
+        if not args.apt_proxy:
+            proxy_command = subprocess.check_output(
+                'eval "$(apt-config shell p Acquire::http::Proxy-Auto-Detect)"; echo "$p"',
+                shell=True,
+                universal_newlines=True,
+            ).strip()
+
+            if proxy_command:
+                args.apt_proxy = subprocess.check_output(
+                    proxy_command,
+                    shell=True,
+                    universal_newlines=True,
+                ).strip()
+
+        if args.apt_proxy:
+            env['AUTOPKGTEST_SETUP_APT_PROXY'] = args.apt_proxy
+
+            # Set http_proxy for the initial debootstrap
+            if args.apt_proxy == 'DIRECT':
+                with suppress(KeyError):
+                    del os.environ['http_proxy']
+            else:
+                env['http_proxy'] = args.apt_proxy
+
+            # Translate proxy address on localhost to one that can be
+            # accessed from the running VM
+            env['AUTOPKGTEST_APT_PROXY'] = re.sub(
+                r'localhost|127\.0\.0\.[0-9]*',
+                '10.0.2.2',
+                args.apt_proxy,
+            )
+
+        script = ''
+
+        for d in DATA_PATHS:
+            s = os.path.join(d, 'setup-commands', 'setup-testbed')
+
+            if os.access(s, os.R_OK):
+                script = s
+                break
+
+        if args.user_script:
+            args.user_script = os.path.abspath(args.user_script)
+            logger.info('Using customization script %s...', args.user_script)
+
+        if args.architecture == default_arch:
+            override_arch = None
+        else:
+            override_arch = args.architecture
+
+        if args.boot == 'auto':
+            if 'arm' in args.architecture:
+                args.boot = 'efi'
+            elif 'ppc64' in args.architecture:
+                args.boot = 'ieee1275'
+            elif args.architecture in ('i386', 'amd64'):
+                # We historically defaulted to BIOS boot on x86.
+                # EFI is also a possibility.
+                args.boot = 'bios'
+            else:
+                raise UsageError(
+                    'Unable to guess an appropriate boot protocol, '
+                    'use --boot to specify'
+                )
+
+        if args.init != 'auto':
+            env['AUTOPKGTEST_SETUP_INIT_SYSTEM'] = args.init
+
+        with TemporaryDirectory() as temp:
+            vmdb2_config = os.path.join(temp, 'vmdb2.yaml')
+
+            self.write_vmdb2_config(
+                vmdb2_config,
+                boot=args.boot,
+                kernel=self.choose_kernel(args.mirror, args.architecture),
+                mirror=args.mirror,
+                override_arch=override_arch,
+                release=args.release,
+                script=script,
+                size=args.size,
+                user_script=args.user_script,
+            )
+
+            try:
+                argv = [
+                    vmdb2,
+                    '--verbose',
+                    '--image=' + image + '.raw',
+                    '--log=' + image + '.log',
+                    vmdb2_config,
+                ]
+
+                if os.getuid() != 0:
+                    argv = self.get_fakemachine_argv(
+                        argv=argv,
+                        env=env,
+                        expose=[script, args.user_script, image],
+                        temp=temp,
+                    )
+                else:
+                    os.environ.update(env)
+
+                try:
+                    subprocess.check_call(argv)
+                except Exception:
+                    subprocess.call([
+                        'cat',
+                        image + '.log',
+                    ])
+                    raise
+
+                subprocess.check_call([
+                    'qemu-img',
+                    'convert',
+                    '-f', 'raw',
+                    '-O', 'qcow2',
+                    image + '.raw',
+                    image + '.new',
+                ])
+                # Replace a potentially existing image as atomically as
+                # possible
+                os.rename(image + '.new', image)
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(image + '.new')
+
+                with suppress(FileNotFoundError):
+                    os.unlink(image + '.raw')
+
+                with suppress(FileNotFoundError):
+                    os.unlink(image + '.log')
+
+    def get_fakemachine_argv(
+        self,
+        *,
+        argv: List[str],
+        env: Dict[str, str],
+        expose: List[str],
+        temp: str,
+    ) -> List[str]:
+        # fakemachine doesn't really work well with arguments
+        # that might contain shell metacharacters, so wrap it
+        # in a script when passing it into fakemachine.
+        wrapper = os.path.join(temp, 'vmdb2-script')
+
+        with open(wrapper, 'w') as writer:
+            writer.write('#!/bin/sh\n')
+            writer.write('set -x\n')
+
+            for k, v in sorted(env.items()):
+                writer.write(
+                    'export {k}={v}\n'.format(
+                        k=k,
+                        v=shlex.quote(v),
+                    )
+                )
+
+            writer.write(' '.join(shlex.quote(a) for a in argv))
+            writer.write('\n')
+
+        os.chmod(wrapper, 0o700)
+
+        fakemachine_argv = [
+            'fakemachine',
+            '-v', temp,
+        ]
+        volumes = set([temp])
+
+        for f in expose:
+            if f:
+                volume = os.path.dirname(os.path.abspath(f))
+
+                if volume not in volumes:
+                    volumes.add(volume)
+                    fakemachine_argv.append('-v')
+                    fakemachine_argv.append(volume)
+
+        fakemachine_argv.append(wrapper)
+        return fakemachine_argv
+
+    def write_vmdb2_config(
+        self,
+        path: str,
+        *,
+        boot: str,
+        kernel: str,
+        mirror: str,
+        override_arch: Optional[str],
+        release: str,
+        script: str,
+        size: str,
+        user_script: str,
+    ):
+        steps = []          # type: List[Dict[str, Any]]
+        steps.append(dict(mkimg='{{ image }}', size=size))
+
+        if boot == 'bios':
+            steps.append(dict(mklabel='msdos', device='{{ image }}'))
+        else:
+            steps.append(dict(mklabel='gpt', device='{{ image }}'))
+
+        if boot == 'efi':
+            root_start = '128MiB'
+            steps.append(
+                dict(
+                    mkpart='primary',
+                    device='{{ image }}',
+                    start='0%',
+                    end=root_start,
+                    tag='efi',
+                )
+            )
+        elif boot == 'ieee1275':
+            root_start = '10MiB'
+            steps.append(
+                dict(
+                    mkpart='primary',
+                    device='{{ image }}',
+                    start='0%',
+                    end=root_start,
+                    tag='prep',
+                )
+            )
+        else:
+            root_start = '0%'
+
+        steps.append(
+            dict(
+                mkpart='primary',
+                device='{{ image }}',
+                start=root_start,
+                end='100%',
+                tag='root',
+            ),
+        )
+
+        steps.append(dict(kpartx='{{ image }}'))
+        steps.append(dict(mkfs='ext4', partition='root'))
+        steps.append(dict(mount='root'))
+
+        debootstrap = {}    # type: Dict[str, Any]
+
+        if override_arch is None:
+            debootstrap['debootstrap'] = release
+        else:
+            debootstrap['qemu-debootstrap'] = release
+            debootstrap['arch'] = override_arch
+
+        debootstrap['mirror'] = mirror
+        debootstrap['target'] = 'root'
+
+        steps.append(debootstrap)
+
+        steps.append(
+            dict(
+                apt='install',
+                packages=[kernel, 'ifupdown'],
+                tag='root',
+            ),
+        )
+
+        if boot == 'efi':
+            steps.append(dict(mkfs='vfat', partition='efi'))
+            steps.append(
+                dict(
+                    grub='uefi',
+                    tag='root',
+                    efi='efi',
+                    console='serial',
+                )
+            )
+        elif boot == 'ieee1275':
+            steps.append(
+                dict(
+                    grub='ieee1275',
+                    tag='root',
+                    prep='prep',
+                    console='serial',
+                ),
+            )
+        elif boot == 'bios':
+            steps.append(
+                dict(
+                    grub='bios',
+                    tag='root',
+                    console='serial',
+                ),
+            )
+
+        steps.append(
+            dict(
+                chroot='root',
+                shell='\n'.join([
+                    'passwd --delete root',
+                    'useradd --home-dir /home/user --create-home user',
+                    'passwd --delete user',
+                    'echo host > /etc/hostname',
+                    "echo '127.0.1.1\thost' >> /etc/hosts",
+                ]),
+            ),
+        )
+
+        steps.append({
+            'shell': '\n'.join([
+                'rootdev=$(ls -1 /dev/mapper/loop* | sort | tail -1)',
+                'uuid=$(blkid -c /dev/null -o value -s UUID "$rootdev")',
+                ('echo "UUID=$uuid / ext4 errors=remount-ro 0 1" '
+                 '> "$ROOT/etc/fstab"'),
+            ]),
+            'root-fs': 'root',
+        })
+
+        if boot == 'efi':
+            steps.append({
+                'shell': '\n'.join([
+                    'efidev=$(ls -1 /dev/mapper/loop* | sort | head -1)',
+                    'uuid=$(blkid -c /dev/null -o value -s UUID "$efidev")',
+                    ('echo "UUID=$uuid /boot/efi vfat defaults 0 2" '
+                     '>> "$ROOT/etc/fstab"'),
+                ]),
+                'root-fs': 'root',
+            })
+
+        for s in (script, user_script):
+            if s:
+                steps.append({
+                    'shell': (
+                        'export AUTOPKGTEST_BUILD_QEMU=1; ' +
+                        shlex.quote(s) + ' "$ROOT"'
+                    ),
+                    'root-fs': 'root',
+                })
+
+        with open(path, 'w') as writer:
+            # It's really YAML, but YAML is a superset of JSON (except in
+            # pathological cases), so writing it out as JSON avoids a
+            # dependency on a non-stdlib YAML library.
+            json.dump(dict(steps=steps), writer)
+
+    def choose_kernel(
+        self,
+        mirror: str,
+        architecture: str,
+    ) -> str:
+        if 'ubuntu' in mirror:
+            return 'linux-image-virtual'
+
+        return DEBIAN_KERNELS.get(architecture, 'linux-image-' + architecture)
+
+
+if __name__ == '__main__':
+    try:
+        BuildQemu().run()
+    except UsageError as e:
+        logger.error('%s', e)
+        sys.exit(2)
+    except subprocess.CalledProcessError as e:
+        logger.error('%s', e)
+        sys.exit(e.returncode or 1)

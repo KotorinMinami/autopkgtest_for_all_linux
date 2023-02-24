@@ -1,0 +1,267 @@
+#!/usr/bin/python3
+#
+# autopkgtest-virt-docker is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# Derived from autopkgtest-virt-lxc.
+#
+# Copyright © 2006-2015 Canonical Ltd.
+# Copyright © 2015 Mathieu Parent <math.parent@gmail.com>
+# Copyright © 2018 Chris Kuehl
+# Copyright © 2018 Iñaki Malerba <inaki@malerba.space>
+# Copyright © 2020 Felipe Sateler
+# Copyright © 2022 Simon McVittie
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import sys
+import os
+import subprocess
+import tempfile
+import shutil
+import argparse
+
+sys.path.insert(0, '/usr/share/autopkgtest/lib')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'lib'))
+
+import VirtSubproc
+import adtlog
+
+
+capabilities = ['revert', 'revert-full-system', 'root-on-testbed']
+
+args = None
+container_id = None
+shared_dir = None
+normal_user = None
+
+
+def parse_args():
+    global args
+
+    parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+
+    parser.add_argument('--docker', dest='command', default='',
+                        action='store_const', const='docker',
+                        help='Use Docker')
+    parser.add_argument('--podman', dest='command',
+                        action='store_const', const='podman',
+                        help='Use Podman')
+    parser.add_argument('--init', action='store_true',
+                        help=('Run a full init system in the container '
+                              '(requires an image with systemd, sysv-rc '
+                              'or openrc included)'))
+    parser.add_argument('-d', '--debug', action='store_true',
+                        help='Enable debugging output')
+    parser.add_argument('-s', '--sudo', action='store_true',
+                        help='Run docker commands with sudo; use if you run '
+                        'autopkgtest as normal user which can\'t write to the '
+                        'Docker socket.')
+    parser.add_argument('-p', '--pull', action='store_true',
+                        help='Pull image before starting container')
+    parser.add_argument('--remote', action='store_true',
+                        help='Assume Podman/Docker is on a remote machine')
+    parser.add_argument('image', help='Base image')
+    parser.add_argument('args', nargs=argparse.REMAINDER,
+                        help='Additional arguments to pass to docker run ')
+    parser.add_argument('--shared-dir', help='Custom shared dir path')
+
+    args = parser.parse_args()
+
+    if args.debug:
+        adtlog.verbosity = 2
+
+    if not args.command:
+        tail = os.path.basename(sys.argv[0])
+
+        if 'docker' in tail and 'podman' not in tail:
+            args.command = 'docker'
+        elif 'podman' in tail:
+            args.command = 'podman'
+        else:
+            parser.error(
+                'Must be invoked as autopkgtest-virt-podman or '
+                'autopkgtest-virt-docker, or with --docker or --podman '
+                'option'
+            )
+
+    if args.command == 'podman':
+        if 'CONTAINER_HOST' in os.environ:
+            args.remote = True
+    else:
+        if 'DOCKER_HOST' in os.environ:
+            args.remote = True
+
+
+def sudoify(command, timeout=None):
+    '''Prepend sudo to command with the --sudo option'''
+
+    if args.sudo:
+        return ['sudo'] + command
+    else:
+        return command
+
+
+def determine_normal_user():
+    '''Check for a normal user to run tests as.'''
+
+    global capabilities, normal_user, container_id
+
+    # get the first UID in the Debian Policy §9.2.2 "dynamically allocated
+    # user account" range
+    cmd = [args.command, 'exec', '-i', container_id, 'sh', '-c',
+           'getent passwd | sort -t: -nk3 | '
+           "awk -F: '{if ($3 >= 1000 && $3 <= 59999) { print $1; exit } }'"]
+    out = VirtSubproc.execute_timeout(None, 10, cmd,
+                                      stdout=subprocess.PIPE)[1].strip()
+    if out:
+        normal_user = out
+        capabilities.append('suggested-normal-user=' + normal_user)
+        adtlog.debug('determine_normal_user: got user "%s"' % normal_user)
+    else:
+        adtlog.debug('determine_normal_user: no uid in [1000,59999] available')
+
+
+def hook_open():
+    global args, container_id, shared_dir, capabilities
+
+    if args.init:
+        capabilities.append('isolation-container')
+
+    if not args.remote:
+        if args.shared_dir:
+            shared_dir = args.shared_dir
+
+        if shared_dir is None:
+            shared_dir = tempfile.mkdtemp(prefix='autopkgtest-virt-docker.shared.')
+        else:
+            # don't change the name between resets, to provide stable downtmp paths
+            os.makedirs(shared_dir)
+
+        os.chmod(shared_dir, 0o755)
+
+    if args.pull:
+        VirtSubproc.check_exec(sudoify([args.command, 'pull', args.image]), outp=True)
+
+    if args.init:
+        command = ['/sbin/init']
+    else:
+        command = ['sleep', 'infinity']
+
+    argv = [args.command]
+
+    if args.debug:
+        if args.command == 'podman':
+            argv.extend(['--log-level=debug'])
+        else:
+            argv.extend(['-D', '--log-level=debug'])
+
+    argv.extend([
+        'run',
+        '--detach=true',
+    ])
+
+    if not args.remote:
+        argv.extend(['--volume', '%s:%s' % (shared_dir, shared_dir)])
+
+    argv.extend(args.args)
+    argv.append(args.image)
+    argv.extend(command)
+
+    container_id = VirtSubproc.check_exec(
+        sudoify(argv),
+        outp=True,
+        fail_on_stderr=False,
+    )
+
+    if args.init:
+        VirtSubproc.wait_booted([args.command, 'exec', '-i', container_id])
+
+    determine_normal_user()
+    adtlog.debug('hook_open: got container ID %s' % container_id)
+    VirtSubproc.auxverb = sudoify([
+        args.command, 'exec', '-i', container_id,
+        'env', '-i', 'bash', '-c',
+        'set -a; '
+        '[ -r /etc/environment ] && . /etc/environment 2>/dev/null || true; '
+        '[ -r /etc/default/locale ] && . /etc/default/locale 2>/dev/null || true; '
+        '[ -r /etc/profile ] && . /etc/profile 2>/dev/null || true; '
+        'set +a;'
+        '"$@"; RC=$?; [ $RC != 255 ] || RC=253; '
+        'set -e;'
+        'myout=$(readlink /proc/$$/fd/1);'
+        'myerr=$(readlink /proc/$$/fd/2);'
+        'myout="${myout/[/\\\\[}"; myout="${myout/]/\\\\]}";'
+        'myerr="${myerr/[/\\\\[}"; myerr="${myerr/]/\\\\]}";'
+        'PS=$(ls -l /proc/[0-9]*/fd/* 2>/dev/null | sed -nr \'\\#(\'"$myout"\'|\'"$myerr"\')# { s#^.*/proc/([0-9]+)/.*$#\\1#; p}\'|sort -u);'
+        'KILL="";'
+        'for pid in $PS; do'
+        '    [ $pid -ne $$ ] && [ $pid -ne $PPID ] || continue;'
+        '    KILL="$KILL $pid";'
+        'done;'
+        '[ -z "$KILL" ] || kill -9 $KILL >/dev/null 2>&1 || true;'
+        'exit $RC', '--'
+    ])
+
+
+def hook_downtmp(path):
+    global capabilities, shared_dir
+
+    if shared_dir:
+        d = os.path.join(shared_dir, 'downtmp')
+        # these permissions are ugly, but otherwise we can't clean up files
+        # written by the testbed when running as user
+        VirtSubproc.check_exec(['mkdir', '-m', '777', d], downp=True)
+        capabilities.append('downtmp-host=' + d)
+    else:
+        d = VirtSubproc.downtmp_mktemp(path)
+    return d
+
+
+def hook_revert():
+    hook_cleanup()
+    hook_open()
+
+
+def hook_cleanup():
+    global capabilities, container_id, shared_dir
+
+    VirtSubproc.downtmp_remove()
+    capabilities = [c for c in capabilities if not c.startswith('downtmp-host')]
+    if shared_dir:
+        shutil.rmtree(shared_dir)
+
+    stop_outp = VirtSubproc.check_exec(sudoify([args.command, 'stop', container_id]), outp=True, fail_on_stderr=False)
+    adtlog.debug('hook_cleanup: %s stopped' % stop_outp)
+    rm_outp = VirtSubproc.check_exec(sudoify([args.command, 'rm', '-f', container_id]), outp=True)
+    adtlog.debug('hook_cleanup: %s removed' % rm_outp)
+
+
+def hook_forked_inchild():
+    pass
+
+
+def hook_capabilities():
+    return capabilities
+
+
+parse_args()
+VirtSubproc.main()

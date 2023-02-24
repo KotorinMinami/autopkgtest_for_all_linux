@@ -1,0 +1,13 @@
+Source: testpkg
+Maintainer: Autopkgtest team <autopkgtest-devel@lists.alioth.debian.org>, Üñïcøδ€ <unicode@example.com>
+Section: oldlibs
+Priority: optional
+Standards-Version: 4.0.1
+Build-Depends: debhelper-compat (= 13)
+
+Package: testpkg
+Architecture: all
+Depends: ${misc:Depends}
+Recommends: apt-doc
+Description: test package
+ Test package, do not install.

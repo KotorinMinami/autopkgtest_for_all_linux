@@ -1,0 +1,51 @@
+#!/bin/sh
+# Copyright © 2016-2020 Simon McVittie
+# Copyright © 2018 Collabora Ltd.
+# SPDX-License-Identifier: GPL-2+
+
+set -e
+set -u
+
+testdir="$(dirname "$(readlink -f "$0")")"
+rootdir="$(dirname "$testdir")"
+
+export MYPYPATH="${PYTHONPATH:="${rootdir}/lib"}"
+
+i=0
+for file in \
+    "$rootdir"/lib/*.py \
+    "$rootdir"/runner/autopkgtest \
+    "$rootdir"/tests/*.py \
+    "$rootdir"/tests/autopkgtest \
+    "$rootdir"/tests/autopkgtest_args \
+    "$rootdir"/tests/qemu \
+    "$rootdir"/tests/testdesc \
+    "$rootdir"/tools/autopkgtest-build-docker \
+    "$rootdir"/tools/autopkgtest-build-qemu \
+    "$rootdir"/tools/autopkgtest-buildvm-ubuntu-cloud \
+    "$rootdir"/virt/autopkgtest-virt-chroot \
+    "$rootdir"/virt/autopkgtest-virt-docker \
+    "$rootdir"/virt/autopkgtest-virt-lxc \
+    "$rootdir"/virt/autopkgtest-virt-lxd \
+    "$rootdir"/virt/autopkgtest-virt-null \
+    "$rootdir"/virt/autopkgtest-virt-qemu \
+    "$rootdir"/virt/autopkgtest-virt-schroot \
+    "$rootdir"/virt/autopkgtest-virt-ssh \
+    "$rootdir"/virt/autopkgtest-virt-unshare \
+; do
+    i=$((i + 1))
+    if [ "${MYPY:="$(command -v mypy || echo false)"}" = false ]; then
+        echo "ok $i - $file # SKIP mypy not found"
+    elif "${MYPY}" \
+            --python-executable="${PYTHON:=python3}" \
+            --follow-imports=skip \
+            --ignore-missing-imports \
+            "$file"; then
+        echo "ok $i - $file"
+    else
+        echo "not ok $i - $file # TODO mypy issues reported"
+    fi
+done
+echo "1..$i"
+
+# vim:set sw=4 sts=4 et:

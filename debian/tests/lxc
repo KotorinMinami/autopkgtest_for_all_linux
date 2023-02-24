@@ -1,0 +1,35 @@
+#!/bin/sh
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -eu
+
+vendor=debian
+suite=testing
+arch="$(dpkg --print-architecture)"
+
+sudoify () {
+    if [ "$(id -u)" = 0 ]; then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+if [ -z "${AUTOPKGTEST_TEST_UNINSTALLED-}" ]; then
+    export AUTOPKGTEST_TEST_INSTALLED=yes
+    build_lxc=autopkgtest-build-lxc
+else
+    build_lxc=tools/autopkgtest-build-lxc
+fi
+
+if ! sudoify "$build_lxc" "$vendor" "$suite" "$arch"; then
+    echo "SKIP: Unable to build autopkgtest-$suite-$arch container"
+    exit 77
+fi
+
+export AUTOPKGTEST_TEST_LXC="autopkgtest-$suite-$arch"
+# Wrapping the test in annotate-output helps to distinguish the output of
+# the autopkgtest that is running these tests from the output of the
+# autopkgtest that is under test.
+exec annotate-output ./tests/autopkgtest LxcRunner

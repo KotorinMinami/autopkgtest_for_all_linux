@@ -1,0 +1,363 @@
+#!/usr/bin/python3
+# autopkgtest-build-docker is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# Copyright © 2006-2014 Canonical Ltd.
+# Copyright © 2018 Iñaki Malerba <inaki@malerba.space>
+# Copyright © 2020 Felipe Sateler
+# Copyright © 2022 Simon McVittie
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import argparse
+import logging
+import os
+import tempfile
+import subprocess
+import sys
+import re
+
+
+logger = logging.getLogger('autopkgtest-build-docker')
+
+DATA_PATHS = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    '/usr/share/autopkgtest',
+)
+
+for p in DATA_PATHS:
+    sys.path.insert(0, os.path.join(p, 'lib'))
+
+
+DPKG_TO_DOCKER_ARCH = {
+    # No translation needed for:
+    # amd64
+    # i386
+    # riscv64
+    # s390x
+
+    'armel': 'arm32v5',
+    'armhf': 'arm32v7',
+    'arm64': 'arm64v8',
+    'ppc64el': 'ppc64le',
+    'mips64el': 'mips64le',
+}
+
+
+class InstallationError(Exception):
+    pass
+
+
+def auto_proxy(command):
+    try:
+        p = os.getenv(
+            'AUTOPKGTEST_APT_PROXY',
+            os.getenv('ADT_APT_PROXY', ''),
+        )
+
+        if not p:
+            p = subprocess.check_output(
+                'eval $(apt-config shell p Acquire::http::Proxy); echo $p',
+                shell=True,
+                universal_newlines=True,
+            ).strip()
+
+        if not p:
+            proxy_command = subprocess.check_output(
+                'eval "$(apt-config shell p Acquire::http::Proxy-Auto-Detect)"; echo "$p"',
+                shell=True,
+                universal_newlines=True,
+            ).strip()
+
+            if proxy_command:
+                p = subprocess.check_output(
+                    proxy_command,
+                    shell=True,
+                    universal_newlines=True,
+                ).strip()
+
+        if p:
+            if command == 'docker':
+                host_ip = subprocess.check_output(
+                    r'''ip -4 a show dev "docker0" | awk '/ inet / {sub(/\/.*$/, "", $2); print $2}' ''',
+                    shell=True, universal_newlines=True).strip()
+            else:
+                # Assume the default slirp4netns networking implementation
+                # for Podman
+                host_ip = '10.0.2.2'
+
+            return re.sub(r'localhost|127\.0\.0\.[0-9]*', host_ip, p)
+        else:
+            return ''
+    except subprocess.CalledProcessError:
+        return ''
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+
+    default_arch = subprocess.check_output(
+        ['dpkg', '--print-architecture'],
+        universal_newlines=True
+    ).strip()
+
+    parser.add_argument('--architecture', '--arch',
+                        default=default_arch,
+                        help='dpkg architecture name (default: {})'.format(
+                            default_arch))
+    parser.add_argument('--vendor', default='', metavar='VENDOR',
+                        help=('OS vendor, typically debian or ubuntu '
+                              '(default: choose using --release, --image, --mirror)'))
+    parser.add_argument('--release', default='', metavar='RELEASE',
+                        help=('An apt suite or codename available from the --mirror '
+                              '(default: choose using --image)'))
+    parser.add_argument('--docker', dest='command', default='',
+                        action='store_const', const='docker',
+                        help='Use Docker')
+    parser.add_argument('--podman', dest='command',
+                        action='store_const', const='podman',
+                        help='Use Podman')
+    parser.add_argument('--init', default='none',
+                        choices=('none', 'systemd', 'sysv-rc', 'openrc'),
+                        help=('Boot using this init system '
+                              '[none|systemd|sysv-rc|openrc; default: none]'))
+    parser.add_argument('-i', '--image', default='',
+                        help='Base image to use (default: choose using --release)')
+    parser.add_argument('-t', '--tag', default='',
+                        help='Name to tag the new image (default: autopkgtest[/INIT]/IMAGE)')
+    parser.add_argument('-m', '--mirror', metavar='URL', default='',
+                        help='Use this mirror for apt (default: auto)')
+    parser.add_argument('-p', '--apt-proxy', metavar='URL', default='',
+                        help='Use a proxy for apt (default: auto)')
+    parser.add_argument('--post-command', default='true',
+                        help='Run shell command in container after setup')
+
+    args = parser.parse_args()
+
+    if args.architecture != default_arch:
+        docker_arch = DPKG_TO_DOCKER_ARCH.get(
+            args.architecture,
+            args.architecture,
+        )
+
+        if not docker_arch:
+            parser.error(
+                'Docker architecture for {} not known'.format(
+                    args.architecture
+                )
+            )
+
+        arch_prefix = docker_arch + '/'
+    else:
+        arch_prefix = ''
+
+    args.vendor = args.vendor.lower()
+
+    if args.release and not args.vendor:
+        try:
+            import distro_info
+        except ImportError:
+            pass
+        else:
+            if args.release in distro_info.DebianDistroInfo().get_all():
+                args.vendor = 'debian'
+            elif args.release in ('stable', 'testing', 'unstable'):
+                args.vendor = 'debian'
+            elif args.release in distro_info.UbuntuDistroInfo().get_all():
+                args.vendor = 'ubuntu'
+
+    if args.mirror and not args.vendor:
+        if 'debian' in args.mirror:
+            args.vendor = 'debian'
+        elif 'ubuntu' in args.mirror:
+            args.vendor = 'ubuntu'
+
+    if (
+        not args.mirror and
+        not args.vendor and
+        not args.release and
+        not args.image
+    ):
+        args.vendor = 'debian'
+
+    if not args.mirror:
+        if args.vendor == 'debian':
+            args.mirror = 'http://deb.debian.org/debian/'
+        elif args.vendor == 'ubuntu':
+            args.mirror = 'http://archive.ubuntu.com/ubuntu/'
+        # else use the mirror specified in the base image
+
+    if not args.image:
+        if not args.vendor:
+            parser.error('Unable to guess distribution vendor, '
+                         'please specify --vendor or --image')
+
+        DEFAULT_TAG = {'debian': 'unstable'}
+
+        args.image = '{a}{v}:{t}'.format(
+            a=arch_prefix,
+            v=args.vendor,
+            t=(args.release or DEFAULT_TAG.get(args.vendor, 'latest')),
+        )
+
+    if not args.command:
+        tail = os.path.basename(sys.argv[0])
+
+        if 'docker' in tail and 'podman' not in tail:
+            args.command = 'docker'
+        elif 'podman' in tail:
+            args.command = 'podman'
+        else:
+            parser.error(
+                'Must be invoked as autopkgtest-virt-podman or '
+                'autopkgtest-virt-docker, or with --docker or --podman '
+                'option'
+            )
+
+    if not args.apt_proxy:
+        args.apt_proxy = auto_proxy(args.command)
+
+    if not args.tag:
+        if args.init != 'none':
+            init_infix = args.init + '/'
+        else:
+            init_infix = ''
+
+        args.tag = 'autopkgtest/' + init_infix + args.image
+
+    return args
+
+
+SETUP_TESTBED_ARGS = [
+    'AUTOPKGTEST_APT_PROXY',
+    'AUTOPKGTEST_APT_SOURCES',
+    'AUTOPKGTEST_KEEP_APT_SOURCES',
+    'AUTOPKGTEST_SETUP_APT_PROXY',
+    'AUTOPKGTEST_SETUP_INIT_SYSTEM',
+    'AUTOPKGTEST_SETUP_VM_POST_COMMAND',
+    'AUTOPKGTEST_SETUP_VM_UPGRADE',
+    'MIRROR',
+    'RELEASE',
+]
+
+
+def create_dockerfile(args):
+    tmpdir = tempfile.TemporaryDirectory()
+
+    script = ''
+
+    for d in DATA_PATHS:
+        s = os.path.join(d, 'setup-commands', 'setup-testbed')
+
+        if os.access(s, os.R_OK):
+            script = s
+            break
+    else:
+        raise InstallationError(
+            'Unable to find setup-commands/setup-testbed in {}'.format(
+                DATA_PATHS
+            )
+        )
+
+    with open(tmpdir.name + '/setup-testbed', 'wb') as writer:
+        with open(script, 'rb') as reader:
+            for line in reader:
+                writer.write(line)
+
+    with open(tmpdir.name + '/Dockerfile', 'w') as f:
+        f.write('ARG IMAGE\n')
+        f.write('FROM $IMAGE\n')
+        f.write('ARG AUTOPKGTEST_BUILD_DOCKER=1\n')
+
+        for arg in sorted(SETUP_TESTBED_ARGS):
+            f.write('ARG {}=\n'.format(arg))
+
+        f.write('COPY setup-testbed /opt/autopkgtest/setup-testbed\n')
+        f.write('RUN sh -eux /opt/autopkgtest/setup-testbed /\n')
+
+        if args.init != 'none':
+            f.write('CMD ["/sbin/init"]\n')
+
+    return tmpdir
+
+
+def build_dockerfile(dirname, args):
+    overrides = {
+        'AUTOPKGTEST_APT_PROXY': args.apt_proxy,
+        'AUTOPKGTEST_SETUP_APT_PROXY': args.apt_proxy,
+        'AUTOPKGTEST_SETUP_VM_POST_COMMAND': args.post_command,
+    }
+
+    if args.release:
+        overrides['RELEASE'] = args.release
+    else:
+        guess = args.image.split(":")[1]
+
+        if guess != 'latest':
+            overrides['RELEASE'] = guess
+
+    if args.init != 'none':
+        overrides['AUTOPKGTEST_SETUP_INIT_SYSTEM'] = args.init
+
+    if os.environ.get('AUTOPKGTEST_KEEP_APT_SOURCES', ''):
+        overrides['AUTOPKGTEST_KEEP_APT_SOURCES'] = 'yes'
+    elif os.environ.get('AUTOPKGTEST_APT_SOURCES_FILE', ''):
+        with open(os.environ['AUTOPKGTEST_APT_SOURCES_FILE'], 'r') as reader:
+            overrides['AUTOPKGTEST_APT_SOURCES'] = reader.read()
+    elif args.mirror:
+        overrides['MIRROR'] = args.mirror
+    else:
+        overrides['AUTOPKGTEST_KEEP_APT_SOURCES'] = 'yes'
+
+    argv = [
+        args.command,
+        'build',
+        '--build-arg=IMAGE={}'.format(args.image),
+        '--tag', args.tag,
+    ]
+
+    for arg in sorted(SETUP_TESTBED_ARGS):
+        if arg in overrides:
+            argv.append('--build-arg={}={}'.format(arg, overrides[arg]))
+        elif arg in os.environ:
+            argv.append('--build-arg={}={}'.format(arg, os.environ[arg]))
+
+    argv.append(dirname)
+    logger.info('%r', argv)
+    subprocess.run(argv)
+
+
+if __name__ == '__main__':
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+
+    try:
+        args = parse_args()
+
+        with create_dockerfile(args) as dockerdir:
+            build_dockerfile(dockerdir, args)
+
+    except InstallationError as e:
+        logger.error('%s', e)
+        sys.exit(1)
+
+    except subprocess.CalledProcessError as e:
+        logger.error('%s', e)
+        sys.exit(e.returncode or 1)

@@ -1,0 +1,179 @@
+quicktests:
+  stage: test
+  image: debian:sid
+  script:
+    - apt-get update
+    - apt-get install -y autodep8 libdpkg-perl pycodestyle pyflakes3 python3-debian
+    - tests/autopkgtest_args
+    - tests/pycodestyle
+    - tests/pyflakes
+    - tests/testdesc
+
+.tests: &tests
+  script:
+    - apt-get update
+    - apt-get install -y apt-utils autodep8 build-essential debhelper libdpkg-perl procps python3 python3-debian
+    - tests/autopkgtest NullRunner NullRunnerRoot ChrootRunner
+
+tests-sid:
+  stage: test
+  image: debian:sid
+  <<: *tests
+
+tests-stable:
+  stage: test
+  image: debian:stable
+  <<: *tests
+
+test-docker:
+  stage: test
+  image: registry.salsa.debian.org/salsa-ci-team/pipeline/autopkgtest
+  services:
+    - name: docker:dind
+      alias: dind
+  variables:
+    DOCKER_HOST: tcp://dind:2375
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ''
+  script:
+    - apt-get update
+    - |
+      apt-get install -y --no-install-recommends \
+      adduser \
+      apt-utils \
+      autodep8 \
+      build-essential \
+      ca-certificates \
+      debhelper \
+      debootstrap \
+      devscripts \
+      docker.io \
+      fakeroot \
+      libdpkg-perl \
+      python3 \
+      python3-debian \
+      python3-distro-info \
+      ${NULL+}
+    - AUTOPKGTEST_TEST_UNINSTALLED=yes sh -x debian/tests/docker
+
+test-lxc:
+  stage: test
+  image: registry.salsa.debian.org/salsa-ci-team/pipeline/autopkgtest
+  script:
+    - apt-get update
+    - |
+      apt-get install -y --no-install-recommends \
+      apt-utils \
+      autodep8 \
+      build-essential \
+      ca-certificates \
+      debhelper \
+      debootstrap \
+      devscripts \
+      distro-info \
+      fakeroot \
+      libdpkg-perl \
+      libpam-cgfs \
+      lxc \
+      lxcfs \
+      lxc-templates \
+      procps \
+      python3 \
+      python3-debian \
+      rsync \
+      sudo \
+      uidmap \
+      ${NULL+}
+    # Thanks to the authors of https://salsa.debian.org/salsa-ci-team/pipeline/
+    # for this magic
+    - /etc/init.d/lxc-net start
+    - /etc/init.d/lxc start
+    - umount -R /sys/fs/cgroup
+    - mount -t cgroup2 -o rw,nosuid,nodev,noexec,relatime cgroup2 /sys/fs/cgroup
+    # Run as non-root to look for regressions in virt-lxc --sudo
+    - adduser autopkgtest
+    - "echo 'autopkgtest ALL=(ALL:ALL) NOPASSWD: ALL' > sudoers"
+    - install -m440 sudoers /etc/sudoers.d/autopkgtest-lxc
+    - AUTOPKGTEST_TEST_UNINSTALLED=yes runuser -u autopkgtest -- sh -x debian/tests/lxc
+
+# TODO: Should test lxd on Gitlab-CI, but it needs non-trivial setup
+
+# We intentionally don't run d/tests/podman-init here. It works in a local
+# qemu VM, but doesn't work in Salsa-CI's Docker container due to problems
+# with /sys/fs/cgroup (unlike d/tests/podman, which works in privileged
+# Docker, even though it likely wouldn't work in an unprivileged container).
+test-podman:
+  stage: test
+  image: registry.salsa.debian.org/salsa-ci-team/pipeline/autopkgtest
+  script:
+    - apt-get update
+    - |
+      apt-get install -y --no-install-recommends \
+      adduser \
+      apt-utils \
+      autodep8 \
+      build-essential \
+      buildah \
+      ca-certificates \
+      catatonit \
+      debhelper \
+      debootstrap \
+      devscripts \
+      fakeroot \
+      golang-github-containernetworking-plugin-dnsname \
+      libdpkg-perl \
+      podman \
+      python3 \
+      python3-debian \
+      python3-distro-info \
+      slirp4netns \
+      uidmap \
+      ${NULL+}
+    - adduser autopkgtest
+    - AUTOPKGTEST_TEST_UNINSTALLED=yes runuser -u autopkgtest -- sh -x debian/tests/podman
+
+test-schroot:
+  stage: test
+  image: debian:stable
+  script:
+    - apt-get update
+    - |
+      apt-get install -y --no-install-recommends \
+      apt-utils \
+      autodep8 \
+      build-essential \
+      debhelper \
+      debootstrap \
+      devscripts \
+      fakeroot \
+      libdpkg-perl \
+      procps \
+      python3 \
+      python3-debian \
+      sbuild \
+      schroot \
+      ${NULL+}
+    - mount -t tmpfs -o mode=0755,size=50% schrootunpack /var/lib/schroot/unpack
+    - AUTOPKGTEST_TEST_UNINSTALLED=yes sh -x debian/tests/schroot
+
+test-unshare:
+  stage: test
+  image: debian:sid
+  script:
+    - apt-get update
+    - |
+      apt-get install -y \
+      apt-utils \
+      autodep8 \
+      build-essential \
+      debhelper \
+      devscripts \
+      libdpkg-perl \
+      procps \
+      python3 \
+      python3-debian \
+      mmdebstrap \
+      uidmap \
+      ${NULL+}
+    - adduser autopkgtest
+    - AUTOPKGTEST_TEST_UNINSTALLED=yes runuser -u autopkgtest -- sh -x debian/tests/unshare

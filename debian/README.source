@@ -1,0 +1,265 @@
+Testing autopkgtest backends
+============================
+
+This is a cheat-sheet for developers of autopkgtest who do not have any
+particular requirements for the packages under test or the containers in
+which they are tested, and just want to prove that the various backends
+still work.
+
+The current working directory is assumed to be the autopkgtest source
+code. Omit the ./runner/ and ./tools/ prefixes to test the system copy.
+
+All examples refer to testing the 'util-linux' source package on amd64, in
+either Debian 11 'bullseye' or Ubuntu 22.04 'jammy'. Adjust as necessary
+for the distribution, architecture and package you actually want to test.
+util-linux is a convenient example of an Essential package with only
+trivial test coverage and few test-dependencies, hence quick to test.
+
+Commands prefixed with # need to be run as root, commands prefixed with $
+can be run as an ordinary user.
+
+Run all this in a virtual machine if you don't want to run as root on
+the host system (for qemu this requires nested KVM).
+
+null
+----
+
+No setup required, but you are responsible for installing build-
+and/or test-dependencies yourself.
+
+$ ./runner/autopkgtest util-linux -- null
+
+To run unit tests:
+
+# apt-get install autopkgtest autodep8 build-essential debhelper
+$ ./tests/autopkgtest NullRunner
+# ./tests/autopkgtest NullRunnerRoot
+
+chroot
+------
+
+This backend is not recommended (schroot is usually preferable).
+
+Automated test (this is run as part of the 'autopkgtest' test-case in
+d/tests/control):
+
+# apt-get install autopkgtest autodep8 build-essential debhelper
+# ./tests/autopkgtest ChrootRunner
+
+schroot
+-------
+
+# apt install debootstrap schroot sbuild
+# mkdir /srv/chroot
+# sbuild-createchroot \
+--arch=amd64 \
+bullseye \
+/srv/chroot/bullseye-amd64-sbuild
+
+(if you are in the sbuild group)
+$ ./runner/autopkgtest util-linux -- schroot bullseye-amd64-sbuild
+(or if you are unprivileged)
+# ./runner/autopkgtest util-linux -- schroot bullseye-amd64-sbuild
+
+Or for Ubuntu:
+
+# apt install ubuntu-keyring
+# sbuild-createchroot \
+--arch=amd64 \
+jammy \
+/srv/chroot/jammy-amd64-sbuild
+# ./runner/autopkgtest util-linux -- schroot jammy-amd64-sbuild
+
+Automated test:
+
+# apt-get install autopkgtest autodep8 build-essential debhelper
+$ AUTOPKGTEST_TEST_SCHROOT=bullseye-amd64-sbuild \
+  ./tests/autopkgtest SchrootRunner
+
+docker
+------
+
+# apt-get install --no-install-recommends docker.io python3-distro-info uidmap
+# ./tools/autopkgtest-build-docker --release=bullseye
+# ./runner/autopkgtest docker -- autopkgtest/debian:bullseye
+
+Or for Ubuntu (specify --vendor=ubuntu if your python3-distro-info is out
+of date):
+
+# ./tools/autopkgtest-build-docker --release=jammy
+# ./runner/autopkgtest docker -- autopkgtest/ubuntu:jammy
+
+To run unit tests:
+
+# AUTOPKGTEST_TEST_DOCKER=autopkgtest/debian:bullseye ./tests/autopkgtest DockerRunner
+
+lxc
+---
+
+This assumes lxc (>= 1:4.0.2-1). Older versions require the lxcbr0 network
+bridge to be set up manually.
+
+# apt-get install --no-install-recommends \
+  ca-certificates debootstrap libpam-cgfs lxc lxcfs lxc-templates rsync uidmap
+# ./tools/autopkgtest-build-lxc debian bullseye amd64
+
+# ./runner/autopkgtest util-linux -- lxc autopkgtest-bullseye-amd64
+(or)
+$ ./runner/autopkgtest util-linux -- lxc --sudo autopkgtest-bullseye-amd64
+
+Or for Ubuntu:
+
+# ./tools/autopkgtest-build-lxc ubuntu jammy amd64
+# ./runner/autopkgtest util-linux -- lxc autopkgtest-jammy-amd64
+
+To run unit tests:
+
+# AUTOPKGTEST_TEST_LXC=autopkgtest-bullseye-amd64 ./tests/autopkgtest LxcRunner
+
+(Users who can sudo can run the automated test as non-root.)
+
+lxd
+---
+
+lxd is available in Debian unstable only, and in Ubuntu.
+
+# apt install lxd
+
+In older Debian releases it is available from third-party snap repositories.
+
+# apt install snapd
+(log out and back in to add /snap/bin to PATH)
+# snap install lxd
+(if you will be running it via sudo)
+# ln -s /snap/bin/lxc* /snap/bin/lxd* /usr/local/bin/
+
+# lxd init
+(for a simple throwaway setup, accept all defaults)
+
+To let unprivileged users access lxd:
+# adduser user lxd
+or use sudo.
+
+$ ./tools/autopkgtest-build-lxd images:debian/bullseye/amd64
+$ lxc image list
+(you will see autopkgtest/debian/bullseye/amd64 listed)
+$ ./runner/autopkgtest util-linux -- lxd autopkgtest/debian/bullseye/amd64
+
+Or for Ubuntu:
+
+$ ./tools/autopkgtest-build-lxd ubuntu:jammy
+$ lxc image list
+(you will see autopkgtest/ubuntu/jammy/amd64 listed)
+$ ./runner/autopkgtest util-linux -- lxd autopkgtest/ubuntu/jammy/amd64
+
+Automated test:
+
+$ apt-get install autopkgtest autodep8 build-essential debhelper
+$ AUTOPKGTEST_TEST_LXD=autopkgtest/debian/bullseye/amd64 ./tests/autopkgtest LxdRunner
+
+podman
+------
+
+Most (all?) of podman's Recommends are necessary: at least slirp4netns and
+uidmap are required when running as non-root.
+
+# apt-get install --install-recommends podman python3-distro-info
+
+With those, you can run podman unprivileged:
+
+$ ./tools/autopkgtest-build-podman --release=bullseye
+$ ./runner/autopkgtest podman -- autopkgtest/debian:bullseye
+
+Or for Ubuntu (as for Docker, specify --vendor=ubuntu if your
+python3-distro-info is out of date):
+
+$ ./tools/autopkgtest-build-podman --release=jammy
+$ ./runner/autopkgtest podman -- autopkgtest/ubuntu:jammy
+
+For the mode in which we run a full init system in the container:
+
+$ ./tools/autopkgtest-build-podman --release=bullseye --init=systemd
+$ ./runner/autopkgtest podman -- autopkgtest/systemd/debian:bullseye
+
+Or try sysv-rc or openrc instead of systemd.
+
+To run unit tests:
+
+$ AUTOPKGTEST_TEST_PODMAN=autopkgtest/debian:bullseye ./tests/autopkgtest PodmanRunner
+$ AUTOPKGTEST_TEST_PODMAN_INIT=autopkgtest/systemd/debian:bullseye ./tests/autopkgtest PodmanInitRunner
+
+qemu
+----
+
+This can be done in a VM:
+
+# apt install qemu-utils vmdb2
+# ./tools/autopkgtest-build-qemu bullseye ./bullseye.qcow2
+
+This can be done in a VM if you have nested KVM enabled, or on the host
+system. The unprivileged user needs write access to /dev/kvm (add them to
+the kvm group if they are not going to be logged-in locally), but no
+other privileges.
+
+# apt install qemu-system-x86 qemu-utils
+$ ./runner/autopkgtest util-linux -- qemu ./bullseye.qcow2
+
+autopkgtest-build-qemu doesn't currently work to build Ubuntu images,
+because vmdb2 assumes grub-install supports the --force-extra-removable
+option, but Ubuntu's grub-install doesn't have that option.
+Instead use a cloud image, which can be done unprivileged:
+
+$ ./tools/autopkgtest-buildvm-ubuntu-cloud --release=jammy
+$ ./runner/autopkgtest util-linux -- qemu ./autopkgtest-jammy-amd64.img
+
+(If you're running a VM inside a VM, you might need to pass something
+like --ram-size=512 after the qemu argument to make the inner VM use
+strictly less memory.)
+
+To run unit tests (WIP, currently expected to fail):
+
+$ AUTOPKGTEST_TEST_QEMU=./bullseye.qcow2 ./tests/autopkgtest QemuRunner
+
+ssh (without a setup script)
+----------------------------
+
+Prepare 'machine' however you want to, then:
+
+$ autopkgtest util-linux -- ssh -H machine
+
+TODO: Document automated test
+
+unshare
+-------
+
+sbuild-createchroot is a convenient way to create the tarball:
+
+$ sbuild-createchroot --chroot-prefix=unshare --chroot-mode=unshare \
+  --make-sbuild-tarball ~/.cache/sbuild/bullseye-amd64.tar.gz \
+  bullseye $(mktemp -d --suffix=.createchroot)
+
+The unshare backend requires unshare(1) from util-linux 2.38 or later.
+On a Debian 11 system, this can be compiled from source if necessary:
+
+$ cd util-linux-2.38
+$ dpkg-buildpackage -us -uc -B
+$ install -D ./unshare ~/.local/bin/unshare
+$ export PATH="$HOME/.local/bin:$PATH"
+
+Then to use autopkgtest:
+
+$ ./runner/autopkgtest util-linux -- unshare -r bullseye
+
+Note that as of Debian 11, the sbuild-createchroot command does not update
+deb-src apt sources, so a setup command might be necessary:
+
+$ ./runner/autopkgtest --U util-linux -- unshare -r bullseye
+(or more minimally)
+$ ./runner/autopkgtest --setup-commands='apt-get -y update' \
+  util-linux -- unshare -r bullseye
+
+Automated test:
+
+# apt-get install autopkgtest autodep8 build-essential debhelper
+$ AUTOPKGTEST_TEST_UNSHARE="$HOME/.cache/sbuild/bullseye-amd64.tar.gz" \
+  ./tests/autopkgtest UnshareRunner

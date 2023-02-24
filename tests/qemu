@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+
+# This testsuite is part of autopkgtest.
+# autopkgtest is a tool for testing Debian binary packages
+#
+# Copyright 2020 Simon McVittie
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import os
+import sys
+import unittest
+
+test_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(test_dir)
+
+sys.path[:0] = [test_dir, os.path.join(root_dir, 'lib')]
+
+from autopkgtest_qemu import Qemu       # noqa
+
+
+class QemuTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+
+    def tearDown(self) -> None:
+        super().tearDown()
+
+    def test_default_qemu_command(self) -> None:
+        def get(u):
+            Qemu.qemu_command_for_arch(Qemu.qemu_arch_for_uname(u))
+
+        self.assertEqual(get('aarch64'), 'qemu-system-aarch64')
+        self.assertEqual(get('armv7l'), 'qemu-system-arm')
+        self.assertEqual(get('armv8l'), 'qemu-system-arm')
+        self.assertEqual(get('i686'), 'qemu-system-i386')
+        self.assertEqual(get('x86_64'), 'qemu-system-x86_64')
+
+    def test_qemu_arch_for_dpkg_arch(self) -> None:
+        get = Qemu.qemu_arch_for_dpkg_arch
+        self.assertEqual(get('amd64'), 'x86_64')
+        self.assertEqual(get('arm64'), 'aarch64')
+        self.assertEqual(get('armel'), 'arm')
+        self.assertEqual(get('armhf'), 'arm')
+        self.assertEqual(get('i386'), 'i386')
+        self.assertEqual(get('m68k'), 'm68k')
+        self.assertEqual(get('mips'), 'mips')
+        self.assertEqual(get('mips64'), 'mips64')
+        self.assertEqual(get('mips64el'), 'mips64el')
+        self.assertEqual(get('mipsel'), 'mipsel')
+        self.assertEqual(get('powerpc'), 'ppc')
+        self.assertEqual(get('ppc64'), 'ppc64')
+        self.assertEqual(get('ppc64el'), 'ppc64le')
+        self.assertEqual(get('riscv64'), 'riscv64')
+        self.assertEqual(get('s390x'), 's390x')
+        self.assertEqual(get('sparc'), 'sparc')
+        self.assertEqual(get('sparc64'), 'sparc64')
+        self.assertEqual(get('x32'), 'x86_64')
+
+    def test_dpkg_arch_for_qemu_arch(self) -> None:
+        get = Qemu.dpkg_arch_for_qemu_arch
+        self.assertEqual(get('aarch64'), 'arm64')
+        self.assertEqual(get('arm'), 'armhf')
+        self.assertEqual(get('i386'), 'i386')
+        self.assertEqual(get('m68k'), 'm68k')
+        self.assertEqual(get('mips'), 'mips')
+        self.assertEqual(get('mips64'), 'mips64')
+        self.assertEqual(get('mips64el'), 'mips64el')
+        self.assertEqual(get('mipsel'), 'mipsel')
+        self.assertEqual(get('ppc'), 'powerpc')
+        self.assertEqual(get('ppc64'), 'ppc64')
+        self.assertEqual(get('ppc64le'), 'ppc64el')
+        self.assertEqual(get('riscv64'), 'riscv64')
+        self.assertEqual(get('s390x'), 's390x')
+        self.assertEqual(get('sparc'), 'sparc')
+        self.assertEqual(get('sparc64'), 'sparc64')
+        self.assertEqual(get('x86_64'), 'amd64')
+
+
+if __name__ == '__main__':
+    # Force encoding to UTF-8 even in non-UTF-8 locales.
+    import io
+    real_stdout = sys.stdout
+    assert isinstance(real_stdout, io.TextIOBase)
+    sys.stdout = io.TextIOWrapper(real_stdout.detach(), encoding="UTF-8", line_buffering=True)
+    unittest.main(testRunner=unittest.TextTestRunner(stream=sys.stdout, verbosity=2))

@@ -1,0 +1,81 @@
+.TH autopkgtest-virt-unshare 1 2022 autopkgtest "Linux Programmer's Manual"
+.SH NAME
+autopkgtest-virt-unshare \- autopkgtest using unshare user namespaces
+.SH SYNOPSIS
+.BI "autopkgtest " "[...] " "-- unshare"
+.RI [ options ]
+
+.SH DESCRIPTION
+.B autopkgtest-virt-unshare
+provides an autopkgtest by using a rootfs tarball and the unshare command to
+create a chroot as a normal user.
+
+.B autopkgtest-virt-unshare
+requires the
+.BR unshare (1)
+executable from util\-linux version 2.38 or later.
+For distribution versions where that is not available system-wide, such
+as Debian 11, Ubuntu 22.04 and older releases, a locally-installed copy
+of the
+.B unshare
+executable in a directory prepended to the
+.B PATH
+is sufficient.
+
+Normally
+.B autopkgtest-virt-unshare
+will be invoked by
+.BR autopkgtest .
+
+.SH OPTIONS
+.TP
+.BR \-a " | " \-\-arch " \fIARCHITECTURE\fR"
+Debian name of the architecture.
+
+.TP
+.BR \-b " | " \-\-bind " \fIOUTSIDE\fR \fIINSIDE\fR"
+Bind mount a directory from the outside to a mountpoint inside.
+\fIOUTSIDE\fR needs to be an existing directory in the local filesystem.
+\fIINSIDE\fR needs to be an absolute path in the new chroot and will be created if it does not exist.
+
+.TP
+.BR \-p " | " \-\-prefix " \fIPREFIX\fR"
+Prefix for the temporary unpack directory (passed to
+.BR mkdtemp
+).
+
+.TP
+.BR \-r " | " \-\-release " \fIRELEASE\fR"
+The distribution to use Mnemonic: the r is the first letter in "release".
+
+.TP
+.BR \-t " | " \-\-tarball " \fI/path/to/tarball\fR"
+Path to a rootfs tarball.
+
+.TP
+.BR \-u " | " \-\-unpack\-dir " \fI/path/for/new/rootfs\fR"
+Specifies a directory where the rootfs tarball should be extracted. By default
+.BR mkdtemp
+is used to create a temporary directory.
+
+.TP
+.BR \-d " | " \-\-debug
+Enables debugging output. Probably not hugely interesting.
+
+.SH INPUT, OUTPUT AND EXIT STATUS
+The behaviour of
+.B autopkgtest-virt-unshare
+is as described by the AutomatedTesting virtualisation regime
+specification.
+
+.SH SEE ALSO
+\fBautopkgtest\fR(1),
+\fBautopkgtest-chroot\fR(1),
+\fB/usr/share/doc/autopkgtest/\fR.
+
+.SH AUTHORS AND COPYRIGHT
+This manpage is part of autopkgtest, a tool for testing Debian binary
+packages. autopkgtest is Copyright (C) 2006-2007 Canonical Ltd and others.
+
+See \fB/usr/share/doc/autopkgtest/CREDITS\fR for the list of
+contributors and full copying conditions.

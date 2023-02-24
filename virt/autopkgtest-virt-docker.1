@@ -1,0 +1,173 @@
+.TH autopkgtest\-virt-docker 1 2015 "Linux Programmer's Manual"
+.SH NAME
+autopkgtest\-virt\-docker, autopkgtest\-virt\-podman \- autopkgtest virtualisation server using Docker/Podman
+
+.SH SYNOPSYS
+.B autopkgtest\-virt\-docker
+.RI [ options ]
+.I docker\-image
+.RI [ "-- extra docker-run args..." ]
+
+.B autopkgtest\-virt\-podman
+.RI [ options ]
+.I podman\-image
+.RI [ "-- extra podman-run args..." ]
+
+.SH DESCRIPTION
+.B autopkgtest-virt-docker
+provides an autopkgtest virtualization server using Docker or Podman.
+It adapts the functionality provided by the
+.BR docker (1)
+or
+.BR podman (1)
+command line for use by autopkgtest.
+
+Normally,
+.B autopkgtest-virt-docker
+will be invoked by
+.BR autopkgtest .
+
+.SH REQUIREMENTS
+
+When run as
+.B autopkgtest\-virt\-podman
+or with the
+.B \-\-podman
+option (recommended), this autopkgtest virtualization server requires
+.BR podman (1),
+from the podman package.
+Unprivileged access to user namespaces must be enabled (this is true by
+default in Debian 11 or later), and the current user must have at least
+65536 subordinate user IDs allocated in
+.B /etc/subuid
+and 65536 subordinate group IDs in
+.BR /etc/subgid .
+See
+.B /usr/share/doc/podman/README.Debian
+for more details.
+
+When run as
+.B autopkgtest\-virt\-docker
+or with the
+.B \-\-docker
+option, this autopkgtest virtualization server requires
+.BR docker (1),
+from the docker.io package.
+The current user must have access to the Docker daemon socket
+.BR /run/docker.sock ,
+unless the
+.B \-\-sudo
+option is used.
+Note that either of these makes the user root-equivalent on the host system.
+Using Podman instead of Docker is recommended.
+
+.SH OPTIONS
+
+.TP
+.BR \-\-docker
+Use Docker containers and the Docker container manager.
+This is the default when invoked as
+.BR autopkgtest-virt-docker .
+
+.TP
+.BR \-\-podman
+Use Podman containers and the Podman container manager.
+This is the default when invoked as
+.BR autopkgtest-virt-podman .
+
+.TP
+.BR \-d " | " \-\-debug
+Enables debugging output.
+
+.TP
+.BR \-\-init
+Launches the container by running
+.B /sbin/init
+as the initial command, instead of the default placeholder command
+.BR "sleep infinity" .
+This will only work for images that contain an init system, such as
+those prepared by \fBautopkgtest-build-podman --init=systemd\fR.
+This option is unlikely to work when using Docker.
+The image will not be able to provide the
+.B isolation-container
+autopkgtest capability unless this option is used.
+
+.TP
+.BR \-p " | " \-\-pull
+Pulls the specified image before setting up the container. By default
+the image is expected to already be present.
+
+.TP
+.BR \-s " | " \-\-sudo
+Run Docker or Podman commands through sudo.
+For Podman, this is rarely useful, because Podman usually runs unprivileged.
+For Docker, use this option if you run autopkgtest as a normal user who
+does not have access to the docker daemon (i.e. is not a member of the
+.B docker
+group).
+
+.PP
+.PP
+You can pass additional options to Docker or Podman: anything after a
+.B --
+gets passed verbatim to
+.BR docker-run (1)
+or
+.BR podman-run (1).
+
+.SH INPUT, OUTPUT AND EXIT STATUS
+The behaviour of
+.B autopkgtest-virt-docker
+is as described by the AutomatedTesting virtualisation regime
+specification.
+
+.SH NOTES
+
+You can create an image suitable for autopkgtest from the semi-official Debian base images,
+like \fBdebian:unstable\fR, or from the official Ubuntu base images, like  \fBubuntu:bionic\fR:
+
+.RS
+.EX
+autopkgtest-build-podman --image debian:sid
+autopkgtest hello_2.8-4.dsc -- podman autopkgtest_debian:sid
+.EE
+.RE
+
+Alternatively, you can test a container that runs a base image directly. However, most images need 
+\fBapt-get update\fR before \fBapt\fR will work, so calling \fBautopkgtest\fR with 
+\fB--setup-commands="apt-get update"\fR will be needed:
+
+.RS
+.EX
+autopkgtest hello_2.8-4.dsc --setup-commands="apt-get update" -- podman debian:sid
+.EE
+.RE
+
+.SH EXAMPLE
+
+You can use "(Semi) Official Debian base images" like \fBdebian:unstable\fR,
+or "Official Ubuntu base images", like \fBubuntu:trusty\fR.
+
+Run tests against \fIhello_2.8\-4.dsc\fR, using the image \fIdebian:unstable\fR:
+
+.RS
+.EX
+autopkgtest \fIhello_2.8\-4.dsc\fR --setup-commands="apt-get update" -- podman \fIdebian:unstable\fR
+.EE
+.RE
+
+.SH SEE ALSO
+\fBautopkgtest\fR(1),
+\fBdocker\-run\fR(1),
+\fBpodman\-run\fR(1),
+\fB/usr/share/doc/autopkgtest/\fR.
+
+.SH AUTHORS AND COPYRIGHT
+.B autopkgtest-virt-docker
+was written by Mathieu Parent <math.parent@gmail.com>.
+
+This manpage is part of autopkgtest, a tool for testing Debian binary
+packages.  autopkgtest is Copyright (C) 2006-2015 Canonical Ltd and others.
+
+See \fB/usr/share/doc/autopkgtest/CREDITS\fR for the list of
+contributors and full copying conditions.

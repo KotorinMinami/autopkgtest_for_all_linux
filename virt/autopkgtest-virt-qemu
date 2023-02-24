@@ -1,0 +1,700 @@
+#!/usr/bin/python3
+#
+# autopkgtest-virt-qemu is part of autopkgtest
+# autopkgtest is a tool for testing Debian binary packages
+#
+# autopkgtest is Copyright (C) 2006-2014 Canonical Ltd.
+#
+# autopkgtest-virt-qemu was developed by
+# Martin Pitt <martin.pitt@ubuntu.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+# See the file CREDITS for a full list of credits information (often
+# installed as /usr/share/doc/autopkgtest/CREDITS).
+
+import shlex
+import sys
+import os
+import time
+import uuid
+import argparse
+from typing import (
+    Any,
+    List,
+    Optional,
+    TYPE_CHECKING,
+)
+
+if TYPE_CHECKING:
+    import socket
+
+sys.path.insert(0, '/usr/share/autopkgtest/lib')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'lib'))
+
+import VirtSubproc
+import adtlog
+from autopkgtest_qemu import Qemu
+
+
+args = None
+qemu = None                             # type: Optional[Qemu]
+normal_user = None
+
+
+def parse_args() -> None:
+    global args
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--qemu-architecture', default=None,
+                        help='Virtual machine architecture (default: auto)')
+    parser.add_argument('--dpkg-architecture', default=None,
+                        help='dpkg architecture (default: auto)')
+    parser.add_argument('-q', '--qemu-command', default=None,
+                        help='QEMU command (default: auto)')
+    parser.add_argument('-o', '--overlay-dir',
+                        help='Temporary overlay directory (default: in /tmp)')
+    parser.add_argument('-u', '--user',
+                        help='user to log into the VM on ttyS0 (must be able '
+                        'to sudo if not "root")')
+    parser.add_argument('-p', '--password', default=None,
+                        help='password for user to log into the VM on ttyS0')
+    parser.add_argument('-c', '--cpus', type=int, default=1,
+                        help='Number of (virtual) CPUs in the VM (default: %(default)s)')
+    parser.add_argument('--ram-size', type=int, default=1024,
+                        help='VM RAM size in MiB (default: %(default)s)')
+    parser.add_argument('--timeout-reboot', type=int, metavar='SECONDS', default=60,
+                        help='timeout for waiting for reboot (default: %(default)ss)')
+    parser.add_argument('--show-boot', action='store_true',
+                        help='Show boot messages from serial console')
+    parser.add_argument('-d', '--debug', action='store_true',
+                        help='Enable debugging output')
+    parser.add_argument('--qemu-options', default='',
+                        help='Pass through (whitespace-separated) arguments to QEMU command.')
+    parser.add_argument('--baseimage', action='store_true', default=False,
+                        help='Provide a read-only copy of the base image at /dev/baseimage')
+    parser.add_argument(
+        '--boot',
+        default='auto',
+        choices=('auto', 'bios', 'efi', 'ieee1275', 'none'),
+        help=(
+            'Configure qemu for this boot protocol '
+            '[auto|bios|efi|ieee1275|none; default: auto]'
+        ),
+    )
+    parser.add_argument(
+        '--efi',
+        dest='boot',
+        action='store_const',
+        const='efi',
+        help='Alias for --boot=efi',
+    )
+    parser.add_argument('images', nargs='+',
+                        help='disk image to add to the VM (in order)')
+
+    args = parser.parse_args()
+
+    if args.debug:
+        adtlog.verbosity = 2
+
+
+def wait_boot() -> None:
+    assert args is not None
+    assert qemu is not None
+    term = qemu.get_console_socket()
+
+    VirtSubproc.expect(term, b' login: ', args.timeout_reboot,
+                       'login prompt on serial console',
+                       echo=args.show_boot)
+    # this is really ugly, but runlevel, "service status hwclock" etc. all
+    # don't help to determine if the system is *really* booted; running
+    # commands too early causes the system time to be all wrong
+    time.sleep(3)
+    term.close()
+
+
+def check_root_shell(term: 'Optional[socket.socket]') -> bool:
+    '''Check if there is a shell running on ttyS1 or hvc1'''
+
+    if term is None:
+        return False
+
+    term.sendall(b'echo -n o; echo k\n')
+    try:
+        VirtSubproc.expect(term, b'ok', 1)
+        term.close()
+        return True
+    except VirtSubproc.Timeout:
+        term.close()
+        return False
+
+
+def setup_shell() -> str:
+    '''Log into the VM and set up root shell on ttyS1'''
+
+    assert qemu is not None
+    assert args is not None
+    user = args.user
+    password = args.password
+
+    for name in ('hvc1', 'ttyS1'):
+        # if the VM is already prepared to start a root shell on ttyS1, just use it
+        if name not in qemu.consoles:
+            continue
+
+        term = VirtSubproc.get_unix_socket(qemu.get_socket_path(name))
+
+        if check_root_shell(term):
+            adtlog.debug('setup_shell(): there already is a shell on %s' % name)
+            return name
+
+    adtlog.debug('setup_shell(): no default shell on hvc1 or ttyS1')
+
+    if user and password is not None:
+        # login on console and start a root shell from there
+        adtlog.debug('Shell setup: have user and password, logging in..')
+        login_tty_and_setup_shell()
+    else:
+        VirtSubproc.bomb('The VM does not start a root shell on ttyS1 or hvc1 already.'
+                         ' The only other supported login mechanism is '
+                         'through --user and --password on the guest ttyS0')
+
+    assert 'hvc1' in qemu.consoles
+    term = VirtSubproc.get_unix_socket(qemu.get_socket_path('hvc1'))
+
+    if check_root_shell(term):
+        return 'hvc1'
+
+    VirtSubproc.bomb('setup_shell(): failed to setup shell on hvc1')
+    raise AssertionError                # not reached
+
+
+def login_tty_and_setup_shell() -> None:
+    '''login on console and start a root shell on hvc1 from there'''
+
+    assert qemu is not None
+    term = qemu.get_console_socket()
+
+    assert args is not None
+    user = args.user
+    assert user is not None
+    password = args.password
+    assert password is not None
+
+    # send user name
+    term.sendall(user.encode('UTF-8') + b'\n')
+    prompt = VirtSubproc.expect(
+        term,
+        (b'assword:', b'#', b'$'),
+        10,
+        'password prompt or shell',
+    )
+
+    if b'assword' in prompt:
+        # send password
+        passwd_b = password.encode('UTF-8')
+        term.sendall(passwd_b + b'\n')
+        VirtSubproc.expect(term, None, 10, 'acked password')
+
+    term.sendall(b'echo "LOG""IN""_"OK\n')
+    adtlog.debug('login_tty: logged in')
+    VirtSubproc.expect(term, b'LOGIN_OK', 120, 'logged in')
+
+    cmd = b'sh </dev/hvc1 >/dev/hvc1 2>&1'
+
+    # if we are a non-root user, run through sudo
+    if user != 'root':
+        cmd = b"echo '%s' | sudo --background --stdin sh -c '" % passwd_b + cmd + b"'"
+    else:
+        cmd = b'setsid ' + cmd
+
+    term.sendall(cmd + b'\n')
+    VirtSubproc.expect(term, None, 10, 'accepted hvc1 shell command')
+
+    term.sendall(b'exit\n')
+    VirtSubproc.expect(term, (b'\nlogout', b'login:'), 10)
+    term.close()
+
+
+class TerminalPrompt:
+    def __init__(self) -> None:
+        self.unique = str(uuid.uuid4())
+        self.sequence = 0
+
+    def set_next_ps1(self) -> bytes:
+        '''Return a bytestring command to set the next prompt.'''
+        self.sequence += 1
+        # Deliberately using unnecessary quoting around the brackets so
+        # that we don't think the command being echoed back to us
+        # *is* the prompt
+        return (
+            'export PS1=%s"["%d"]# "' % (shlex.quote(self.unique), self.sequence)
+        ).encode('ascii')
+
+    @property
+    def expected_prompt(self) -> bytes:
+        '''The prompt generated by the previous set_ps1, as a bytestring.'''
+        return b'%s[%d]' % (self.unique.encode('ascii'), self.sequence)
+
+
+def setup_baseimage(tty: str, prompt: TerminalPrompt) -> None:
+    '''setup /dev/baseimage in VM'''
+
+    assert qemu is not None
+    term = VirtSubproc.get_unix_socket(qemu.get_socket_path(tty))
+
+    # Setup udev rules for /dev/baseimage; set link_priority to -1024 so
+    # that the duplicate UUIDs of the partitions will have no effect.
+    term.sendall(
+        b'''mkdir -p -m 0755 /run/udev/rules.d ; ''' +
+        b'''printf '# Created by autopkgtest-virt-qemu\\n%s\\n%s\\n%s\\n' 'KERNEL=="vd*[!0-9]", ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024", SYMLINK+="baseimage", MODE="0664"' 'KERNEL=="vd*[0-9]",  ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024"' 'KERNEL=="vd*", ENV{ID_SERIAL}=="BASEIMAGE", ENV{ID_FS_TYPE}:="", ENV{ID_FS_USAGE}:="", ENV{ID_FS_UUID}:=""' > /run/udev/rules.d/61-baseimage.rules; ''' +
+        b'''%s''' % prompt.set_next_ps1()
+    )
+    VirtSubproc.expect(term, prompt.expected_prompt, 10)
+    # Reload udev to make sure the rules take effect (udev only auto-
+    # rereads rules every 3 seconds)
+    term.sendall(b'udevadm control --reload; %s\n' % prompt.set_next_ps1())
+    VirtSubproc.expect(term, prompt.expected_prompt, 10)
+
+    # Add the base image as an additional drive
+    monitor = qemu.monitor_socket
+    monitor.sendall(('drive_add 0 file=%s,if=none,readonly=on,serial=BASEIMAGE,id=drive-baseimage,format=%s\n' % (qemu.images[0].file, qemu.images[0].format)).encode())
+    VirtSubproc.expect(monitor, b'(qemu)', 10)
+    monitor.sendall(b'device_add virtio-blk-pci,drive=drive-baseimage,id=virtio-baseimage\n')
+    VirtSubproc.expect(monitor, b'(qemu)', 10)
+
+    term.sendall(b'udevadm settle --exit-if-exists=/dev/baseimage; %s\n' %
+                 prompt.set_next_ps1())
+    VirtSubproc.expect(term, prompt.expected_prompt, 10)
+    term.close()
+    monitor.close()
+
+
+def setup_shared(shared_dir: str, tty: str, prompt: TerminalPrompt) -> None:
+    '''Set up shared dir'''
+
+    assert qemu is not None
+    term = VirtSubproc.get_unix_socket(qemu.get_socket_path(tty))
+
+    term.sendall(b'''mkdir -p -m 1777 /run/autopkgtest/shared
+mount -t 9p -o trans=virtio,access=any autopkgtest /run/autopkgtest/shared
+chmod 1777 /run/autopkgtest/shared
+touch /run/autopkgtest/shared/done_shared
+%s
+''' % prompt.set_next_ps1())
+
+    with VirtSubproc.timeout(10, 'timed out on client shared directory setup'):
+        flag = os.path.join(shared_dir, 'done_shared')
+        while not os.path.exists(flag):
+            time.sleep(0.2)
+    VirtSubproc.expect(term, prompt.expected_prompt, 30)
+
+    # ensure that root has $HOME set
+    term.sendall(b'[ -n "$HOME" ] || export HOME=`getent passwd root|cut -f6 -d:`; %s\n' %
+                 prompt.set_next_ps1())
+    VirtSubproc.expect(term, prompt.expected_prompt, 5)
+
+    # create helper for runcmd: cat data from its stdin (from a file) to stdout
+    # eternally (like tail -f), but stop once either an "EOF" file exists and
+    # we copied at least as many bytes as given in that EOF file (the first
+    # arg), or an "exit flag" file exists.
+    # We don't run that from /run/autopkgtest/shared as 9p from older QEMU
+    # versions is buggy and causes "invalid numeric result" errors on that.
+    term.sendall(b'''PYTHON=$(command -v python3) || PYTHON=$(command -v python); cat <<EOF > /tmp/eofcat; chmod 755 /tmp/eofcat; %s
+#!$PYTHON
+import sys, os, fcntl, time, errno
+(feof, fexit) = sys.argv[1:]
+count = 0
+limit = None
+fcntl.fcntl(0, fcntl.F_SETFL, fcntl.fcntl(0, fcntl.F_GETFL) | os.O_NONBLOCK)
+while not os.path.exists(fexit):
+    try:
+        block = os.read(0, 1000000)
+        if block:
+            os.write(1, block)
+            count += len(block)
+            continue
+    except OSError as e:
+        if e.errno != errno.EAGAIN:
+            raise
+
+    time.sleep(0.05)
+    if limit is None:
+        try:
+            with open(feof, 'r') as f:
+                limit = int(f.read())
+        except (IOError, ValueError):
+            pass
+
+    if limit is not None and count >= limit:
+        break
+EOF
+''' % prompt.set_next_ps1())
+    VirtSubproc.expect(term, prompt.expected_prompt, 5)
+    term.close()
+
+
+def setup_config(shared_dir: str, tty: str, prompt: TerminalPrompt) -> None:
+    '''Set up configuration files'''
+
+    assert qemu is not None
+    term = VirtSubproc.get_unix_socket(qemu.get_socket_path(tty))
+
+    # copy our timezone, to avoid time skews with the host
+    if os.path.exists('/etc/timezone'):
+        tz = None
+        with open('/etc/timezone', 'rb') as f:
+            for line in f:
+                if line.startswith(b'#'):
+                    continue
+                line = line.strip()
+                if line:
+                    tz = line
+                    break
+
+        if tz:
+            adtlog.debug('Copying host timezone %s to VM' % tz.decode())
+            term.sendall(b'echo ' + tz + b' > /etc/timezone; DEBIAN_FRONTEND=noninteractive dpkg-reconfigure tzdata; %s\n' % prompt.set_next_ps1())
+            VirtSubproc.expect(term, prompt.expected_prompt, 30)
+        else:
+            adtlog.debug('Could not determine host timezone')
+
+    # ensure that we have Python for our the auxverb helpers
+    term.sendall(b'type python3 2>/dev/null || type python 2>/dev/null\n')
+    try:
+        out = VirtSubproc.expect(term, b'/python', 30)
+    except VirtSubproc.Timeout:
+        VirtSubproc.bomb('Neither python3 nor python is installed in the VM, '
+                         'one of them is required by autopkgtest')
+    if b'\n# ' not in out:
+        VirtSubproc.expect(term, b'# ', 5)
+
+    # Make sure we can upgrade grub-pc. vmdb2 sets it up the first time
+    # but doesn't set up the configuration to be able to upgrade it.
+    term.sendall(
+        br'''
+        if [ -d /usr/lib/grub/i386-pc ]; then
+            grub-mkdevicemap
+            first_device=$(
+                grub-mkdevicemap -m - | \
+                sed -n 's/^(hd[0-9]\+)[ \t]\+//p' | \
+                head -n1
+            )
+            if [ -n "$first_device" ]; then
+                echo "grub-pc grub-pc/install_devices multiselect $first_device" > /run/autopkgtest-debconf
+                echo "grub-pc grub-pc/install_devices seen true" >> /run/autopkgtest-debconf
+                echo "grub-pc grub-pc/install_devices_disks_changed multiselect $first_device" >> /run/autopkgtest-debconf
+                echo "grub-pc grub-pc/install_devices_disks_changed seen true" >> /run/autopkgtest-debconf
+                debconf-set-selections /run/autopkgtest-debconf
+            fi
+        fi
+        %s
+        ''' % prompt.set_next_ps1()
+    )
+    VirtSubproc.expect(term, prompt.expected_prompt, 5)
+
+    term.close()
+
+
+def make_auxverb(shared_dir: str, tty: str, prompt: TerminalPrompt) -> None:
+    '''Create auxverb script'''
+
+    assert qemu is not None
+    auxverb = os.path.join(qemu.workdir, 'runcmd')
+    with open(auxverb, 'w') as f:
+        f.write('''#!%(py)s
+import sys, os, tempfile, threading, time, atexit, shutil, fcntl, errno
+import socket
+try:
+    from shlex import quote
+except ImportError:
+    from pipes import quote
+
+dir_host = '%(dir)s'
+job_host = tempfile.mkdtemp(prefix='job.', dir=dir_host)
+atexit.register(shutil.rmtree, job_host)
+os.chmod(job_host, 0o755)
+job_guest = '/run/autopkgtest/shared/' + os.path.basename(job_host)
+running = True
+
+def shovel(fin, fout, flagfile_on_eof=None):
+    fcntl.fcntl(fin, fcntl.F_SETFL,
+                fcntl.fcntl(fin, fcntl.F_GETFL) | os.O_NONBLOCK)
+    count = 0
+    while True:
+        try:
+            block = os.read(fin, 1000000)
+            if flagfile_on_eof and not block:
+                os.fsync(fout)
+                os.close(fout)
+                with open(flagfile_on_eof, 'w') as f:
+                    f.write('%%i' %% count)
+                return
+            count += len(block)
+        except OSError as e:
+            if e.errno != errno.EAGAIN:
+                raise
+            block = None
+        if not block:
+            if not running:
+                return
+            time.sleep(0.01)
+            continue
+        while True:
+            try:
+                os.write(fout, block)
+                break
+            except OSError as e:
+                if e.errno != errno.EAGAIN:
+                    raise
+                continue
+
+
+# redirect the guest process stdin/out/err files to our stdin/out/err
+fin = os.path.join(job_host, 'stdin')
+stdin_eof = os.path.join(job_host, 'stdin_eof')
+fout = os.path.join(job_host, 'stdout')
+ferr = os.path.join(job_host, 'stderr')
+with open(fout, 'w'):
+    pass
+with open(ferr, 'w'):
+    pass
+t_stdin = threading.Thread(None, shovel, 'copyin', (sys.stdin.fileno(), os.open(fin, os.O_CREAT|os.O_WRONLY), stdin_eof))
+t_stdin.start()
+t_stdout = threading.Thread(None, shovel, 'copyout', (os.open(fout, os.O_RDONLY), sys.stdout.fileno()))
+t_stdout.start()
+t_stderr = threading.Thread(None, shovel, 'copyerr', (os.open(ferr, os.O_RDONLY), sys.stderr.fileno()))
+t_stderr.start()
+
+# Run command through QEMU shell. We can't directly feed the stdin file into
+# the process as we'd hit EOF too soon; so funnel it through eofcat to get a
+# "real" stdin behaviour.
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('%(tty)s')
+cmd = 'PYTHONHASHSEED=0 /tmp/eofcat %%(d)s/stdin_eof %%(d)s/exit.tmp < %%(d)s/stdin | ' \\
+      '(%%(c)s >> %%(d)s/stdout 2>> %%(d)s/stderr; echo $? > %%(d)s/exit.tmp);' \\
+      'mv %%(d)s/exit.tmp %%(d)s/exit\\n' %% \\
+       {'d': job_guest, 'c': ' '.join(map(quote, sys.argv[1:]))}
+s.sendall(cmd.encode())
+
+# wait until command has exited
+path_exit = os.path.join(job_host, 'exit')
+while not os.path.exists(path_exit) or os.path.getsize(path_exit) == 0:
+    time.sleep(0.2)
+running = False
+
+# mop up terminal response
+while True:
+    try:
+        block = s.recv(4096, socket.MSG_DONTWAIT)
+        if not block:
+            break
+    except IOError:
+        break
+    time.sleep(0.05)
+s.close()
+
+with open(path_exit) as f:
+    rc = int(f.read().strip())
+
+t_stdin.join()
+t_stdout.join()
+t_stderr.join()
+# code 255 means that the auxverb itself failed, so translate
+sys.exit(rc == 255 and 253 or rc)
+''' % {'py': sys.executable, 'tty': qemu.get_socket_path(tty), 'dir': shared_dir})
+
+    os.chmod(auxverb, 0o755)
+
+    VirtSubproc.auxverb = [auxverb]
+
+    # verify that we can connect
+    status = VirtSubproc.execute_timeout(None, 5, VirtSubproc.auxverb + ['true'])[0]
+    if status == 0:
+        adtlog.debug('can connect to autopkgtest sh in VM')
+    else:
+        VirtSubproc.bomb('failed to connect to VM')
+
+
+def determine_normal_user(
+    shared_dir: str,
+    tty: str,
+    prompt: TerminalPrompt,
+) -> None:
+    '''Check for a normal user to run tests as.'''
+
+    assert qemu is not None
+    term = VirtSubproc.get_unix_socket(qemu.get_socket_path(tty))
+
+    global normal_user
+
+    assert args is not None
+    user = args.user or ''      # type: str
+
+    if user and user != 'root':
+        normal_user = user
+        return
+
+    # get the first UID in the Debian Policy §9.2.2 "dynamically allocated
+    # user account" range
+    term.sendall(b"getent passwd | sort -t: -nk3 | "
+                 b"awk -F: '{if ($3 >= 1000 && $3 <= 59999) { print $1; exit } }'"
+                 b"> /run/autopkgtest/shared/normal_user; %s\n" % prompt.set_next_ps1())
+    VirtSubproc.expect(term, prompt.expected_prompt, 5)
+    outfile = os.path.join(shared_dir, 'normal_user')
+    with open(outfile) as f:
+        out = f.read()
+        if out:
+            normal_user = out.strip()
+            adtlog.debug('determine_normal_user: got user "%s"' % normal_user)
+        else:
+            adtlog.debug('determine_normal_user: no uid in [1000,59999] available')
+    term.close()
+
+
+def hook_open() -> None:
+    global qemu
+    assert args is not None
+
+    qemu = Qemu(
+        boot=args.boot,
+        cpus=args.cpus,
+        dpkg_architecture=args.dpkg_architecture,
+        images=args.images,
+        overlay=True,
+        overlay_dir=args.overlay_dir,
+        qemu_architecture=args.qemu_architecture,
+        qemu_command=args.qemu_command,
+        qemu_options=args.qemu_options.split(),
+        ram_size=args.ram_size,
+    )
+
+    try:
+        try:
+            wait_boot()
+        finally:
+            # remove overlay as early as possible, to avoid leaking large
+            # files; let QEMU run with the deleted inode
+            overlay = qemu.images[0].overlay
+            assert overlay is not None
+            os.unlink(overlay)
+        tty = setup_shell()
+        prompt = TerminalPrompt()
+        if args.baseimage:
+            setup_baseimage(tty, prompt)
+        setup_shared(qemu.shareddir, tty, prompt)
+        setup_config(qemu.shareddir, tty, prompt)
+        make_auxverb(qemu.shareddir, tty, prompt)
+        determine_normal_user(qemu.shareddir, tty, prompt)
+    except Exception:
+        # Clean up on failure
+        hook_cleanup()
+        raise
+
+
+def hook_downtmp(path: str) -> None:
+    # we would like to do this, but 9p is currently way too slow for big source
+    # trees
+    # downtmp = '/run/autopkgtest/shared/tmp'
+    # VirtSubproc.check_exec(['mkdir', '-m', '1777', downtmp], downp=True)
+    return VirtSubproc.downtmp_mktemp(path)
+
+
+def hook_revert() -> None:
+    VirtSubproc.downtmp_remove()
+    hook_cleanup()
+    hook_open()
+
+
+def hook_cleanup() -> None:
+    global qemu
+    assert qemu is not None
+
+    qemu.cleanup()
+    qemu = None
+
+
+def hook_prepare_reboot() -> None:
+    assert args is not None
+    assert qemu is not None
+
+    if args.baseimage:
+        # Remove baseimage drive again, so that it does not break the subsequent
+        # boot due to the duplicate UUID
+        monitor = qemu.monitor_socket
+        monitor.sendall(b'device_del virtio-baseimage\n')
+        VirtSubproc.expect(monitor, b'(qemu)', 10)
+        monitor.close()
+
+
+def hook_wait_reboot(*func_args: Any, **kwargs: Any) -> None:
+    assert args is not None
+    assert qemu is not None
+
+    os.unlink(os.path.join(qemu.shareddir, 'done_shared'))
+    wait_boot()
+    tty = setup_shell()
+    prompt = TerminalPrompt()
+    setup_shared(qemu.shareddir, tty, prompt)
+    if args.baseimage:
+        setup_baseimage(tty, prompt)
+
+
+def hook_capabilities() -> List[str]:
+    global normal_user
+    caps = [
+        'isolation-machine',
+        'reboot',
+        'revert',
+        'revert-full-system',
+        'root-on-testbed',
+    ]
+    # disabled, see hook_downtmp()
+    # caps.append('downtmp-host=%s' % os.path.join(qemu.workdir, 'shared', 'tmp'))
+    if normal_user:
+        caps.append('suggested-normal-user=' + normal_user)
+    return caps
+
+
+def hook_shell(dir: str, *extra_env: Any) -> None:
+    assert qemu is not None
+
+    if qemu.ssh_port:
+        user = normal_user or '<user>'
+        ssh = '    ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -p %i %s@localhost\n' % (
+            qemu.ssh_port, user)
+    else:
+        ssh = ''
+
+    with open('/dev/tty', 'w') as f:
+        f.write('''You can now log into the VM through the serial terminal.
+Depending on which terminal program you have installed, you can use one of
+
+%(ssh)s    minicom -D unix#%(tty0)s
+    nc -U %(tty0)s
+    socat - UNIX-CONNECT:%(tty0)s
+
+The tested source package is in %(dir)s
+
+Press Enter to resume running tests.
+''' % {'tty0': os.path.join(qemu.workdir, 'ttyS0'), 'dir': dir, 'ssh': ssh})
+    with open('/dev/tty', 'r') as f:
+        f.readline()
+
+
+parse_args()
+VirtSubproc.main()

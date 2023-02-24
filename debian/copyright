@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+
+Files: *
+Copyright:
+ 2006-2018 Canonical Ltd. and others
+ 2012-2017 Martin Pitt
+ 2016-2020 Simon McVittie
+ 2016-2020 Antonio Terceiro
+ 2017 Jiri Palecek
+ 2017-2020 Collabora Ltd.
+ 2018 Thadeu Lima de Souza Cascardo
+ 2019 Michael Biebl
+ 2019 Raphaël Hertzog
+ 2019 Sébastien Delafond
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ The full text of the GPL is distributed as in
+ /usr/share/common-licenses/GPL-2 on Debian systems.

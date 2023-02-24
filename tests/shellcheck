@@ -1,0 +1,47 @@
+#!/bin/sh
+# Copyright © 2018-2020 Collabora Ltd
+# SPDX-License-Identifier: GPL-2+
+
+set -e
+set -u
+
+testdir="$(dirname "$(readlink -f "$0")")"
+rootdir="$(dirname "$testdir")"
+
+if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "1..0 # SKIP shellcheck not available"
+    exit 0
+fi
+
+n=0
+for shell_script in \
+    "$rootdir"/lib/in-testbed/*.sh \
+    "$rootdir"/lib/unshare-helper \
+    "$rootdir"/setup-commands/* \
+    "$rootdir"/ssh-setup/* \
+    "$rootdir"/tests/mypy \
+    "$rootdir"/tests/pycodestyle \
+    "$rootdir"/tests/pyflakes \
+    "$rootdir"/tests/run-parallel \
+    "$rootdir"/tests/shellcheck \
+    "$rootdir"/tests/ssh-setup-lxd \
+; do
+    n=$((n + 1))
+
+    case "$shell_script" in
+        (*/ssh-setup/adb | */ssh-setup/maas | */ssh-setup/nova)
+            echo "ok $n - $shell_script # SKIP Someone who can test this needs to fix it"
+            continue
+            ;;
+    esac
+
+    if shellcheck --shell=dash "$shell_script"; then
+        echo "ok $n - $shell_script"
+    else
+        echo "not ok $n # TODO - $shell_script"
+    fi
+done
+
+echo "1..$n"
+
+# vim:set sw=4 sts=4 et:

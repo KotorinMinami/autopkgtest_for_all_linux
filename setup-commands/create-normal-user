@@ -1,0 +1,78 @@
+#!/bin/sh
+# Copyright 2022 Simon McVittie
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# create-normal-user [USERNAME]
+# Create an ordinary, unprivileged user.
+
+set -eu
+
+usage () {
+    echo "Usage: create-normal-user [USERNAME]" >&2
+    exit 2
+}
+
+create () {
+    local user="$1"
+    shift
+
+    if command -v adduser >/dev/null; then
+        adduser \
+            --disabled-login \
+            --gecos 'Temporary autopkgtest user,,,' \
+            "$user"
+    elif command -v useradd >/dev/null; then
+        useradd \
+            --comment 'Temporary autopkgtest user' \
+            --create-home \
+            --expiredate '' \
+            --user-group \
+            "$user"
+    else
+        echo "Neither adduser nor useradd is installed" >&2
+        return 1
+    fi
+
+    echo "$user" > /run/autopkgtest-normal-user
+}
+
+case "${1-}" in
+    (--)
+        shift
+        ;;
+
+    (-*)
+        usage
+        ;;
+esac
+
+if [ "$#" -gt 1 ]; then
+    usage
+fi
+
+if [ "$#" -eq 1 ]; then
+    create "$1"
+    exit 0
+fi
+
+tries=20
+
+for i in $(seq 0 "$tries"); do
+    if [ "$i" = 0 ]; then
+        user="test"
+    else
+        random=$(mktemp /tmp/test-XXXXXX)
+        user="$(basename "$random")"
+        rm -f "$random"
+    fi
+
+    if getent passwd "$user" >/dev/null; then
+        echo "create-normal-user: '$user' already exists"
+    else
+        create "$user"
+        exit 0
+    fi
+done
+
+echo "create-normal-user: Unable to generate a new username (tried $tries times)" >&2
+exit 1

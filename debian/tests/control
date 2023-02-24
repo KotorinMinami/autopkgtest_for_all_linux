@@ -1,0 +1,135 @@
+Tests: autopkgtest
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         debhelper (>= 13),
+         fakeroot,
+Restrictions: needs-sudo
+
+Tests: installed
+Depends: autopkgtest
+
+Tests: docker
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         ca-certificates,
+         debhelper (>= 13),
+         debootstrap,
+         devscripts,
+         docker.io,
+         python3-distro-info,
+         uidmap,
+# breaks-testbed is not strictly true, but declaring breaks-testbed
+# forces a new testbed to be used, which reduces the chance of running
+# out of disk space
+Restrictions: allow-stderr,
+              breaks-testbed,
+              isolation-machine,
+              needs-internet,
+              needs-root,
+              skippable,
+
+Tests: lxc
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         ca-certificates,
+         debhelper (>= 13),
+         debootstrap,
+         devscripts,
+         distro-info,
+         fakeroot,
+         libpam-cgfs,
+         lxc,
+         lxcfs,
+         lxc-templates,
+         rsync,
+         uidmap,
+Restrictions: allow-stderr,
+              breaks-testbed,
+              isolation-machine,
+              needs-internet,
+              needs-sudo,
+              skippable,
+
+# TODO: Run this with needs-sudo instead of needs-root to check that
+# virt-lxd --sudo hasn't regressed?
+Tests: lxd
+Depends: adduser,
+         autodep8,
+         autopkgtest,
+         build-essential,
+         debhelper (>= 13),
+         devscripts,
+         distro-info,
+         fakeroot,
+         iptables,
+         lxd,
+Restrictions: allow-stderr,
+              breaks-testbed,
+              isolation-machine,
+              needs-internet,
+              needs-root,
+              skip-not-installable,
+              skippable,
+
+Tests: podman podman-init
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         buildah,
+         ca-certificates,
+         catatonit | tini | dumb-init,
+         debhelper (>= 13),
+         debootstrap,
+         devscripts,
+         golang-github-containernetworking-plugin-dnsname,
+         podman,
+         python3-distro-info,
+         slirp4netns,
+         uidmap,
+# breaks-testbed is not strictly true, but declaring breaks-testbed
+# forces a new testbed to be used, which reduces the chance of running
+# out of disk space
+Restrictions: allow-stderr,
+              breaks-testbed,
+              isolation-machine,
+              needs-internet,
+              skippable,
+
+# breaks-testbed is not strictly true, but we do make a change to
+# /etc/hosts without reverting it. Declaring breaks-testbed also forces a
+# new testbed to be used, as above
+Tests: schroot
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         debhelper (>= 13),
+         debootstrap,
+         devscripts,
+         fakeroot,
+         sbuild,
+         schroot,
+Restrictions: allow-stderr,
+              breaks-testbed,
+              needs-internet,
+              needs-root,
+              skippable,
+
+# breaks-testbed is not strictly true, but declaring breaks-testbed
+# forces a new testbed to be used
+Tests: unshare
+Depends: autodep8,
+         autopkgtest,
+         build-essential,
+         debhelper (>= 13),
+         devscripts,
+         mmdebstrap,
+         uidmap,
+         util-linux (>= 2.38),
+Restrictions: allow-stderr,
+              breaks-testbed,
+              isolation-machine,
+              needs-internet,
+              skippable,
