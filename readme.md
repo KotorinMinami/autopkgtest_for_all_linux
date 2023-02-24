@@ -85,4 +85,4 @@ bash auto.sh port apt_list install_dist workdir img
 ```
 注意u-boot镜像也要在workdir中,
 运行结束后会产生pkg_no_souce , pkg_no_test 与 pkg_finish列表，只做计数用。
-测试结果会在test文件夹中
+测试结果会在testing文件夹中
