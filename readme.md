@@ -50,7 +50,7 @@ bash setup_testbed_u_boot.sh
 ### 非debian系或有自定义安装位置的需求
 安装对应依赖，以Arch为例：（red hat系至少fedora有对应的包的记载）
 ```
-pacman -Syu dpkg python-debian make
+pacman -Syu dpkg python-debian make install
 ```
 clone本仓库或debian[源码仓库](https://salsa.debian.org/ci-team/autopkgtest.git)
 进入仓库目录后：
@@ -85,4 +85,4 @@ bash auto.sh port apt_list workdir img install_dist
 ```
 注意u-boot镜像也要在workdir中,
 运行结束后会产生pkg_no_souce , pkg_no_test 与 pkg_finish列表，只做计数用。
-测试结果会在test文件夹中
+测试结果会在testing文件夹中
