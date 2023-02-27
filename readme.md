@@ -7,9 +7,9 @@
 ```
 mount -o remount rw /boot
 ```
-更改/etc/extlinux/extlinux.conf
+更改/boot/extlinux/extlinux.conf
 ```
-vi /etc/extlinux/extlinux.conf
+vi /boot/extlinux/extlinux.conf
 ```
 在第一个label下的append一行加入`console=tty0 console=ttyS0 console=hvc0`，如：
 
@@ -81,7 +81,7 @@ sudo autopkgtest systemd_245.4-4ubuntu3.19.dsc -o test -d \
 - 另一份作为autopkgtest的镜像文件
 - 其中[auto.sh](./auto.sh)即实现运行测试例，筛选功能，手动调整部分为启动source镜像，选择一个没有被占用的端口并输入auto.sh,同时需要保证source镜像内/root文件夹为空。apt_list为待测的软件包的列表，install_dist为你安装autopkgtest时的DESTDIR，workdir为autopkgtest使用镜像所在位置，img为对应镜像名， 总的使用格式如下
 ```
-bash auto.sh port apt_list install_dist workdir img
+bash auto.sh port apt_list workdir img install_dist
 ```
 注意u-boot镜像也要在workdir中,
 运行结束后会产生pkg_no_souce , pkg_no_test 与 pkg_finish列表，只做计数用。

@@ -16,12 +16,12 @@ do
     mkdir ./testing/${pkg_dsc%%_*}
     
     
-    $3/usr/bin/autopkgtest ./src/$pkg_dsc -o ./test/${pkg_dsc%%_*} \
+    $5/usr/bin/autopkgtest ./src/$pkg_dsc -o ./testing/${pkg_dsc%%_*} \
     -d -B -- qemu -u root -p openkylin --qemu-architecture=riscv64 -c 8 --ram-size=8192 \
-    -d '--qemu-options=-machine virt -kernel '$4'/u-boot.bin' $4'/'$5
+    -d '--qemu-options=-machine virt -kernel '$3'/u-boot.bin' $3'/'$4
     
     
-    grep "SKIP no tests in this package" ./test/"${pkg_dsc%%_*}"/summary
+    grep "SKIP no tests in this package" ./testing/"${pkg_dsc%%_*}"/summary
     if [ $? -eq 0 ];then
         echo "$line" >> pkg_no_test
     else 

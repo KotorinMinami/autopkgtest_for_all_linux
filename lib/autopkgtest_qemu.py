@@ -358,7 +358,7 @@ class Qemu:
             ) % self.shareddir,
         ])
 
-        if self.qemu_architecture == 'riscv':
+        if self.qemu_architecture == 'riscv64':
             argv.extend([
                 '-device', 'virtio-net-device,netdev=usernet',
                 '-netdev', 'user,id=usernet' + nic_opt,
