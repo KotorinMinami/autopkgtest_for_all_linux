@@ -76,13 +76,30 @@ sudo autopkgtest systemd_245.4-4ubuntu3.19.dsc -o test -d \
 - --qemu-options决定qemu启动时附加的命令行参数
 - qcow2文件为镜像文件
 
-## 自动化对应思路
-- 将准备的镜像拷贝两份，一份为source,正常启动并使用ssh获取openkylin对应软件源的源码包
-- 另一份作为autopkgtest的镜像文件
-- 其中[auto.sh](./auto.sh)即实现运行测试例，筛选功能，手动调整部分为启动source镜像，选择一个没有被占用的端口并输入auto.sh,同时需要保证source镜像内/root文件夹为空。apt_list为待测的软件包的列表，install_dist为你安装autopkgtest时的DESTDIR，workdir为autopkgtest使用镜像所在位置，img为对应镜像名， 总的使用格式如下
+## 自动化脚本说明
+此处给出可自动进行多个pkg包测试并分类归入文件夹的脚本：`auto_autopkgtest.py`,目前可实现如下功能：
+- 自动获取镜像中apt可装所有软件，并生成列表
+- 导入给定列表将其中的软件包进行测试，并对结果进行分类，详细结果分类包括：
+    - 测试完成——测试结果将位于workDir/testRes文件夹中
+    - 软件包源码中并未含有测试用例——对应文件夹将于workDir/emptyTest文件夹中
+    - 无法通过此软件包名从`apt-get source`中获得源码包——将无对应文件夹，其软件名将输出至./pkg_no_source列表中
+- 自动获取其源码文件树——重点为源码中的测试源码
+    - 由于源码中的测试例形式多样，无法以一种统一的方式获得全面的测试源码，故会将源码文件树完全保存，请自行甄别
+
+详细使用方法如下：
 ```
-bash auto.sh port apt_list workdir img install_dist
+python3 auto_autopkgtest.py [-h] [-l LIST] [--image IMAGE] [-w WORKDIR] [--src] [-a] [--kernel KERNEL] [--destdir DESTDIR] -- [autopkgtest_args] -- qemu [qemu_args]
+
+具体参数:
+  -l LIST, --list LIST  要批量测试的软件包列表
+  --image IMAGE         qemu镜像名
+  -w WORKDIR, --workDir WORKDIR
+                        工作目录，qemu镜像因应在此目录下，测试结果同样会被输出自此，若不填，则默认为脚本所在目录
+  --src                 是否获取源码
+  -a                    是否获取apt中所有软件的源码
+  --kernel KERNEL       启动qemu时-kernel一项文件所在的完整路径
+  --destdir DESTDIR     安装autopkgtest是对应的destdir
+  autopkgtest_args      autopkgtest运行时的运行参数，具体如上autopkgtest的使用
+  qemu_args             autopkgtest-virt-qemu运行时的参数，具体可参考上面autopkgtest的使用
 ```
-注意u-boot镜像也要在workdir中,
-运行结束后会产生pkg_no_souce , pkg_no_test 与 pkg_finish列表，只做计数用。
-测试结果会在testing文件夹中
+简单的对第一个`--`后参数的解释，将正常启动autopkgtest的整串命令，去除前面的autopkgtest,中间的测试包名，以及output-dir，后面` -- qemu`后的镜像名，以及--qemu-option所得到的字符串即为需要放在第一个`--`后的全部
