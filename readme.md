@@ -47,6 +47,8 @@ bash setup_testbed_u_boot.sh
 ## autopkgtest及其依赖的安装
 ### debian系
 可直接使用`apt install autopkgtest -y`安装
+### redhat系
+可使用 [autopkgtest.spec](./autopkgtest.spec) 构建，该 spec 在 fedora38 构建 5.30 版本通过
 ### AUR
 可使用任意 AUR helper 安装``yay -S autopkgtest``
 ### 非debian系或有自定义安装位置的需求
